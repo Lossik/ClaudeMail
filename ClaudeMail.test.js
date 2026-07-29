@@ -455,6 +455,32 @@ test('deleting requires --yes and well-formed refs', () => {
 	assert.deepEqual(opts.deletes, ['gmail:INBOX:5', 'gmail:INBOX:7', 'work:INBOX:9']);
 });
 
+test('moving needs a destination, --yes and well-formed refs', () => {
+	assert.throws(() => parseArgs(['--move', 'gmail:Trash:5', '--move-to', 'INBOX']), /requires --yes/);
+	assert.throws(() => parseArgs(['--move', 'gmail:Trash:5', '--yes']), /requires --move-to/);
+	assert.throws(() => parseArgs(['--move', 'gmail:Trash', '--move-to', 'INBOX', '--yes']), /expects <account>/);
+	assert.throws(() => parseArgs(['--move', 'gmail:Trash:abc', '--move-to', 'INBOX', '--yes']), /not a valid UID/);
+	// A destination without anything to move is a typo, not a no-op worth running.
+	assert.throws(() => parseArgs(['--move-to', 'INBOX']), /only applies to --move/);
+
+	const opts = parseArgs(['--move', 'gmail:Trash:5,gmail:Trash:7', '--move', 'work:Trash:9', '--move-to', '@archive', '--yes']);
+	assert.deepEqual(opts.moves, ['gmail:Trash:5', 'gmail:Trash:7', 'work:Trash:9']);
+	assert.equal(opts.moveTo, '@archive');
+	assert.deepEqual(opts.deletes, []);
+});
+
+test('moving and deleting cannot be asked for in the same run', () => {
+	// Both write, and each one names a different destination for the same UID.
+	assert.throws(
+		() => parseArgs(['--move', 'gmail:Trash:5', '--move-to', 'INBOX', '--delete', 'gmail:INBOX:6', '--yes']),
+		/cannot be combined with --delete/,
+	);
+	assert.throws(
+		() => parseArgs(['--move', 'gmail:Trash:5', '--move-to', 'INBOX', '--purge', '--yes']),
+		/--purge cannot be combined with --move/,
+	);
+});
+
 test('parseRef keeps colons that belong to the folder name', () => {
 	assert.deepEqual(parseRef('gmail:[Gmail]/All Mail:42', '--body'), {
 		accountName: 'gmail', folder: '[Gmail]/All Mail', uid: '42',

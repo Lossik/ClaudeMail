@@ -7,15 +7,16 @@ description: >-
   kontroly", „maily za posledních 6 hodin", „co mi přišlo ze dne 20.7.",
   „přišlo něco od Nováka", „co je nového v mailu". Umí i dotáhnout plné znění
   konkrétní zprávy, vypsat hlavičky, najít odkazy, odhlásit z newsletteru
-  („odhlas mě z toho"), stáhnout přílohy („stáhni mi tu fakturu") a na výslovný
-  pokyn smazat mail („smaž ten spam", „vyhoď ty newslettery"). Odesílat ani
-  odpovídat neumí.
+  („odhlas mě z toho"), stáhnout přílohy („stáhni mi tu fakturu"), na výslovný
+  pokyn smazat mail („smaž ten spam", „vyhoď ty newslettery") a přesunout ho
+  mezi složkami, včetně vytažení z koše („vrať to zpátky", „ulož to do
+  archivu"). Odesílat ani odpovídat neumí.
 ---
 
 # Kontrola mailů (ClaudeMail)
 
-Nástroj je read-only IMAP klient — jediné dvě výjimky jsou `--delete` a
-`--unsubscribe --yes`, obě popsané níž. Spouštěj ho **vždy jako `ClaudeMail.cmd`**
+Nástroj je read-only IMAP klient — jediné výjimky jsou `--delete`, `--move` a
+`--unsubscribe --yes`, všechny popsané níž. Spouštěj ho **vždy jako `ClaudeMail.cmd`**
 (s příponou) — je v PATH, takže funguje z jakéhokoli adresáře i shellu:
 
 ```
@@ -66,6 +67,7 @@ Konfigurace s hesly je v `~\.claudemail\config.json`.
 | „ukaž mi všechny odkazy", „kde je odhlašovací odkaz" | `--links all` |
 | „od koho to doopravdy je", „ukaž hlavičky" | `--headers <ref>` |
 | „odhlas mě z toho" | `--unsubscribe <ref>` (viz níže) |
+| „vrať to z koše", „přesuň to do archivu" | `--move <ref> --move-to <složka>` (viz níže) |
 | „ukaž další" (po stránkování) | `--offset <n>` |
 
 Další volby: `--limit <n>` (default 50), `--offset <n>`, `--no-snippet`
@@ -254,7 +256,8 @@ ClaudeMail.cmd --save work:INBOX:8412 --out C:\cesta\jinam
 
 ## Mazání
 
-Mazání je **jediná operace, která do schránky zapisuje**. Postupuj vždy takto:
+Mazání a přesun jsou **jediné dvě operace, které do schránky zapisují**.
+U mazání postupuj vždy takto:
 
 1. Nejdřív zprávu vylistuj — `ref=` bereš z výpisu, nikdy si UID nevymýšlej.
 2. **Vypiš uživateli, co se chystáš smazat** (datum, odesílatel, předmět)
@@ -269,6 +272,29 @@ Mazání je **jediná operace, která do schránky zapisuje**. Postupuj vždy ta
 - `--purge` maže **nevratně**. Použij jen na výslovné vyžádání a předem
   upozorni, že to nejde vzít zpět.
 - Nikdy nemaž proaktivně ani v rámci úklidu z vlastní iniciativy.
+
+## Přesun mezi složkami (a vytažení z koše)
+
+Smazání je vnitřně přesun do koše, takže **omylem smazaný mail se dá vrátit** —
+`--move` je totéž s vypsaným cílem:
+
+```
+ClaudeMail.cmd --move gmail:Trash:12345 --move-to INBOX --yes    # zpátky z koše
+ClaudeMail.cmd --move gmail:INBOX:8412 --move-to @archive --yes  # uklidit
+```
+
+- `--move-to` bere skutečný název složky (`INBOX`) nebo alias `@trash`,
+  `@archive`, `@junk`, `@sent`, `@all`. Neexistující složku odmítne **předtím**,
+  než něco přesune.
+- Vyžaduje `--yes` jako mazání. Stejný postup: **nejdřív vypiš, co se chystáš
+  přesunout a kam**, a počkej na potvrzení.
+- Zprávu v koši najdeš přes `--folder @trash` (v PowerShellu **dej alias do
+  uvozovek** — `'@trash'`, jinak si ho vyloží jako splatting a rozbije parsování
+  dalších argumentů). `ref=` pak ukazuje do `Trash`, ne do `INBOX`.
+- **UID se přesunem změní.** Starý `ref=` po úspěšném přesunu neplatí; nový si
+  vytáhni novým výpisem. Datum a příznak přečtení zůstávají, takže vrácená
+  zpráva se ve výpisu podle data objeví na svém původním místě, ne nahoře.
+- `--move` nejde kombinovat s `--delete` ani `--purge`.
 
 ## Pravidla
 

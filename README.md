@@ -5,10 +5,10 @@ headers plus a body preview of recent mail and prints them compactly, so an
 assistant can summarize *who wrote what*.
 
 Reading is strictly read-only — mailboxes are opened with `EXAMINE`, so nothing
-is marked as seen. The only operation that writes to the mailbox is an explicit
-`--delete`, and the only one that contacts anything but the IMAP server is
-`--unsubscribe --yes`. **There is no SMTP**: the tool cannot send or reply to
-mail.
+is marked as seen. The only operations that write to the mailbox are an explicit
+`--delete` or `--move`, and the only one that contacts anything but the IMAP
+server is `--unsubscribe --yes`. **There is no SMTP**: the tool cannot send or
+reply to mail.
 
 ## Layout
 
@@ -116,8 +116,8 @@ Output:
   ref=work:INBOX:8412
 ```
 
-`ref=` identifies a message for `--body`, `--save` and `--delete`, in the form
-`account:folder:uid`.
+`ref=` identifies a message for `--body`, `--save`, `--delete` and `--move`, in
+the form `account:folder:uid`.
 
 ### Spam and bulk mail
 
@@ -176,6 +176,28 @@ node ClaudeMail.js --delete work:INBOX:8412 --yes --purge  # PERMANENT
 `--yes` is mandatory so that a typo in some other command can never delete mail.
 Without `--purge` this is a move to Trash; the folder is found through IMAP
 SPECIAL-USE, or can be named explicitly with `--trash-folder`.
+
+### Moving
+
+Deleting is a move to Trash, and `--move` is the same operation with the
+destination spelled out - which is how a message comes back out of Trash:
+
+```bash
+node ClaudeMail.js --move work:Trash:8412 --move-to INBOX --yes     # undo a delete
+node ClaudeMail.js --move a:Trash:1,a:Trash:2 --move-to INBOX --yes # several at once
+node ClaudeMail.js --move work:INBOX:8412 --move-to @archive --yes  # file it away
+```
+
+`--move-to` takes a real folder name or any of the `@junk`/`@trash`/`@archive`/
+`@sent`/`@all` aliases, and the folder has to exist - the run stops before
+touching anything if it does not, because a MOVE into a missing mailbox fails
+with a bare `[TRYCREATE]` that never names what was wrong. `--yes` is mandatory
+here too, and `--move` cannot be combined with `--delete` or `--purge`.
+
+The UID changes: IMAP MOVE re-creates the message in the destination, so the
+`ref=` from the listing is spent once the move succeeds. Flags and the internal
+date survive, so a restored message reappears at its original position in a
+listing sorted by date, not at the top.
 
 ### Threads, search, paging
 

@@ -116,13 +116,19 @@ Attachments (read-only, like every other read):
   --out <dir>        Target directory (default ~/Downloads/ClaudeMail)
   --max-size <MB>    Skip attachments larger than this (default 25)
 
-Deleting (the only mode that writes to the server):
+Deleting and moving (the only modes that write to the server):
   --delete <ref>     Move a message to Trash. Takes a ref= value from the
                      listing; repeatable, or comma-separated
-  --yes              Required alongside --delete, so no typo can delete mail
+  --yes              Required alongside --delete and --move, so no typo can
+                     move or delete mail
   --purge            Permanently expunge instead of moving to Trash. Not
                      recoverable - only use when explicitly asked for
   --trash-folder <f> Override Trash folder detection
+  --move <ref>       Move a message to any folder instead of Trash - this is
+                     how a message comes back out of it. Same ref= values as
+                     --delete; repeatable, or comma-separated
+  --move-to <folder> Destination for --move: a real folder name such as INBOX,
+                     or one of the @junk/@trash/@archive/@sent/@all aliases
 
 This tool has no SMTP: it can never send or reply to mail.
 `;
@@ -134,6 +140,7 @@ function parseArgs(argv) {
 		accounts: [],
 		folders: [],
 		deletes: [],
+		moves: [],
 		limit: 50,
 		offset: 0,
 		maxScan: 1000,
@@ -186,6 +193,8 @@ function parseArgs(argv) {
 			case '--out': opts.out = value(); break;
 			case '--max-size': opts.maxSize = Number(value()) * 1048576; break;
 			case '--delete': opts.deletes.push(...value().split(',').map((s) => s.trim()).filter(Boolean)); break;
+			case '--move': opts.moves.push(...value().split(',').map((s) => s.trim()).filter(Boolean)); break;
+			case '--move-to': opts.moveTo = value(); break;
 			case '--yes': opts.yes = true; break;
 			case '--purge': opts.purge = true; break;
 			case '--trash-folder': opts.trashFolder = value(); break;
@@ -210,6 +219,14 @@ function parseArgs(argv) {
 		if (!opts.yes) throw new Error('--delete also requires --yes (guard against deleting mail by accident)');
 		for (const ref of opts.deletes) parseRef(ref, '--delete');
 	}
+	if (opts.moves.length) {
+		if (opts.deletes.length) throw new Error('--move cannot be combined with --delete (one destination per run)');
+		if (opts.purge) throw new Error('--purge cannot be combined with --move (a move never expunges)');
+		if (!opts.moveTo) throw new Error('--move also requires --move-to <folder> (there is no default destination)');
+		if (!opts.yes) throw new Error('--move also requires --yes (guard against moving mail by accident)');
+		for (const ref of opts.moves) parseRef(ref, '--move');
+	}
+	if (opts.moveTo && !opts.moves.length) throw new Error('--move-to only applies to --move');
 	if (opts.body) parseRef(opts.body, '--body');
 	if (opts.headers) parseRef(opts.headers, '--headers');
 	if (opts.unsubscribe) parseRef(opts.unsubscribe, '--unsubscribe');
@@ -1107,19 +1124,27 @@ function resolveAccount(accounts, name) {
 }
 
 /**
- * Moves the referenced messages to Trash (or expunges them with --purge).
+ * Moves the referenced messages: to Trash for --delete, to a named folder for
+ * --move, or nowhere at all for --purge, which expunges them instead. Deleting
+ * is itself a move, so both flags run through here rather than duplicating the
+ * grouping and reporting.
+ *
  * Each message is identified and printed before it is touched, so the caller
- * can see exactly what disappeared.
+ * can see exactly what moved where.
  */
-async function deleteMessages(accounts, opts) {
+async function relocateMessages(accounts, opts) {
+	const moving = opts.moves.length > 0;
+	const flag = moving ? '--move' : '--delete';
+	const refs = moving ? opts.moves : opts.deletes;
+
 	if (!opts.yes) {
-		throw new Error('--delete also requires --yes (guard against deleting mail by accident)');
+		throw new Error(`${flag} also requires --yes (guard against moving mail by accident)`);
 	}
 
 	// Group by account and folder: one connection and one mailbox open per group.
 	const groups = new Map();
-	for (const ref of opts.deletes) {
-		const { accountName, folder, uid } = parseRef(ref, '--delete');
+	for (const ref of refs) {
+		const { accountName, folder, uid } = parseRef(ref, flag);
 		resolveAccount(accounts, accountName); // Fail before connecting anywhere.
 		const key = `${accountName} ${folder}`;
 		if (!groups.has(key)) groups.set(key, { accountName, folder, uids: [] });
@@ -1133,12 +1158,18 @@ async function deleteMessages(accounts, opts) {
 
 		try {
 			await withClient(account, async (client) => {
-				const trash = opts.purge ? null : await findTrashFolder(client, opts.trashFolder);
-				if (!opts.purge && !trash) {
+				const target = opts.purge
+					? null
+					: moving
+						? await findMoveTarget(client, opts.moveTo)
+						: await findTrashFolder(client, opts.trashFolder);
+				if (!opts.purge && !target) {
 					throw new Error('no Trash folder found - use --trash-folder <name>, or --purge to delete permanently');
 				}
-				if (!opts.purge && trash === folder) {
-					throw new Error(`messages are already in Trash (${folder}); use --purge to remove them permanently`);
+				if (!opts.purge && target === folder) {
+					throw new Error(moving
+						? `messages are already in ${folder}`
+						: `messages are already in Trash (${folder}); use --purge to remove them permanently`);
 				}
 
 				const lock = await client.getMailboxLock(folder, { readOnly: false });
@@ -1155,12 +1186,12 @@ async function deleteMessages(accounts, opts) {
 						const label = `${fmtDateTime(msg.internalDate)} | ${formatAddress(msg.envelope?.from?.[0])} | ${msg.envelope?.subject || '(no subject)'}`;
 						const ok = opts.purge
 							? await client.messageDelete(uid, { uid: true })
-							: await client.messageMove(uid, trash, { uid: true });
+							: await client.messageMove(uid, target, { uid: true });
 
 						if (ok) {
-							console.log(`${opts.purge ? 'PURGED' : `moved to ${trash}`}: ${label}`);
+							console.log(`${opts.purge ? 'PURGED' : `moved to ${target}`}: ${label}`);
 						} else {
-							console.log(`! failed to delete ${accountName}:${folder}:${uid} - ${label}`);
+							console.log(`! failed to ${moving ? 'move' : 'delete'} ${accountName}:${folder}:${uid} - ${label}`);
 							failures++;
 						}
 					}
@@ -1216,6 +1247,22 @@ async function findTrashFolder(client, override) {
 
 	const { flag, names } = FOLDER_ALIASES['@trash'];
 	return findSpecialFolder(client, flag, names);
+}
+
+/**
+ * Resolves a --move-to destination and proves it exists before anything is
+ * moved. A MOVE into a missing mailbox fails with a bare "[TRYCREATE]", which
+ * never names the folder that was wrong - and the message would stay put while
+ * the run still looked like it had done something.
+ */
+async function findMoveTarget(client, name) {
+	const path = await resolveFolder(client, name);
+	const mailboxes = await client.list();
+	const match = mailboxes.find((box) => box.path === path);
+	if (!match) {
+		throw new Error(`folder "${name}" does not exist on the server - see the folder names in your config, or use @trash/@archive/@junk/@sent`);
+	}
+	return match.path;
 }
 
 /**
@@ -1491,8 +1538,8 @@ async function main() {
 		return;
 	}
 
-	if (opts.deletes.length) {
-		await deleteMessages(allAccounts, opts);
+	if (opts.deletes.length || opts.moves.length) {
+		await relocateMessages(allAccounts, opts);
 		return;
 	}
 
