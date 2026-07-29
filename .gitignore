@@ -3,3 +3,6 @@ config.json
 config.json.*
 *.bak
 .state.json
+
+# Local project notes - contains concrete paths and account names
+CLAUDE.md
