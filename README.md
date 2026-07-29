@@ -5,8 +5,10 @@ headers plus a body preview of recent mail and prints them compactly, so an
 assistant can summarize *who wrote what*.
 
 Reading is strictly read-only — mailboxes are opened with `EXAMINE`, so nothing
-is marked as seen. The only operation that writes is an explicit `--delete`.
-**There is no SMTP**: the tool cannot send or reply to mail.
+is marked as seen. The only operation that writes to the mailbox is an explicit
+`--delete`, and the only one that contacts anything but the IMAP server is
+`--unsubscribe --yes`. **There is no SMTP**: the tool cannot send or reply to
+mail.
 
 ## Layout
 
@@ -99,6 +101,7 @@ node ClaudeMail.js --subject invoice          # subject filter
 node ClaudeMail.js --account work             # a single account
 node ClaudeMail.js --since 1w --no-snippet    # fast, headers only
 node ClaudeMail.js --body gmail:INBOX:12345   # full text of one message
+node ClaudeMail.js --headers gmail:INBOX:12345  # who sent it, and how to leave
 ```
 
 Output:
@@ -180,7 +183,7 @@ SPECIAL-USE, or can be named explicitly with `--trash-folder`.
 and `In-Reply-To` only (union-find over those identifiers). Subject is
 deliberately **not** used as a fallback key — it would merge unrelated mail that
 happens to share a subject like "Invoice". Each block shows the time span,
-message count, participants and a preview of the latest message; `refs=` lists
+message count, participants and a preview of the newest messages; `refs=` lists
 every message in the thread.
 
 `--from`, `--subject` and `--text` are translated into IMAP
@@ -201,12 +204,63 @@ into the window, so pre-trimming is impossible in that mode; `--max-scan`
 The reported count ("of 213") is the real number of matches, not the number of
 messages downloaded.
 
-`--links` prints full URLs from the body — snippets shorten them to a bare
-domain, which makes them impossible to open. Unsubscribe, tracking and footer
-links are omitted.
+Each thread block previews its **two newest** messages, not just the newest one.
+Systems like GitLab send a status notification ("Reassigned issue", "Issue was
+closed") on top of the message that caused it, so the last message in a thread
+is regularly the one that says least — an eleven-message discussion summarized
+as `Reassigned Issue 550`. Two previews keep the content visible whichever order
+they arrived in.
 
-Body previews are downloaded only after the global sort and trim — and in
-`--threads` mode, only for the latest message of each conversation.
+Body previews are downloaded only after the global sort and trim, and only for
+messages that will actually be printed.
+
+### Links
+
+`--links` prints full URLs from the body — snippets shorten them to a bare
+domain, which makes them impossible to open. Unsubscribe, tracking, asset and
+footer links are omitted.
+
+`--links all` turns that filtering off. Those omitted links are exactly what
+someone asking *"how do I get off this list"* is after.
+
+URLs are read from the **markup as well as the text**. Two habits of real
+newsletters would otherwise hide every link in them: the text conversion drops
+`href` targets on purpose (inline URLs bury the words, leaving "unsubscribe
+here" with no *here*), and the sender's `text/plain` alternative is routinely
+stripped of URLs altogether. Reading only the part the preview came from
+reported that a mail full of links contained none.
+
+A digest shortens long lists and says by how much; `--body <ref> --links all`
+prints every one. When nothing is found the output says so, rather than
+printing nothing at all — an empty result and a body that failed to download
+used to look identical.
+
+### Headers and unsubscribing
+
+```bash
+node ClaudeMail.js --headers gmail:INBOX:12345               # the notable ones
+node ClaudeMail.js --headers gmail:INBOX:12345 --all-headers # everything
+node ClaudeMail.js --unsubscribe gmail:INBOX:12345           # show the options
+node ClaudeMail.js --unsubscribe gmail:INBOX:12345 --yes     # actually leave
+```
+
+`--headers` prints the fields that answer a question someone actually asks —
+sender, `Reply-To`, `Return-Path`, threading, every `List-*`, and the
+spam/authentication verdicts — with RFC 2047 encoded words decoded. Delivery
+plumbing (`Received` chains, DKIM signatures) needs `--all-headers`.
+
+`--unsubscribe` reads `List-Unsubscribe` and prints what the sender offers.
+On its own it sends nothing. With `--yes` it performs the
+[RFC 8058](https://www.rfc-editor.org/rfc/rfc8058) one-click POST, and only
+that:
+
+- a sender without `List-Unsubscribe-Post: List-Unsubscribe=One-Click` is
+  refused, because requesting such a URL promises nothing — it may only record
+  the click;
+- `mailto:` options are printed, never used — there is no SMTP here;
+- a message tagged `spam` or `auth-fail` is refused outright. Unsubscribing
+  confirms that the address is live and read, which is worth more to that kind
+  of sender than the mail costs the recipient.
 
 ### Time window
 
@@ -221,7 +275,9 @@ two forms, so both `--since 2026-07-15 --until 2026-07-20` and
 - IMAP `SEARCH SINCE` has day granularity only, so the server query is widened
   to whole days and the exact time is re-filtered locally against `INTERNALDATE`.
 - Body previews are fetched only for messages that will actually be printed, and
-  only the first few KB of the text part.
+  only the first few KB of the text part — except under `--links`, where the
+  whole part is needed, since a newsletter's unsubscribe link sits at the very
+  bottom of it.
 - Quoted replies and signatures are stripped from snippets; if that would leave
   almost nothing, the original text is used instead.
 

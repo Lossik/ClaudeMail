@@ -47,8 +47,10 @@ const USAGE = `ClaudeMail - IMAP digest (read-only, except for explicit --delete
 Usage:
   node ClaudeMail.js [selection] [filters] [output]
   node ClaudeMail.js --body <account>:<folder>:<uid>
+  node ClaudeMail.js --headers <ref> [--all-headers]
   node ClaudeMail.js --attachments <ref>
   node ClaudeMail.js --save <ref> [--part <n>] [--out <dir>]
+  node ClaudeMail.js --unsubscribe <ref> [--yes]
   node ClaudeMail.js --delete <ref> [--delete <ref> ...] --yes
   node ClaudeMail.js --accounts
 
@@ -79,7 +81,9 @@ Grouping and paging:
   --offset <n>       Skip the newest <n> - page with --limit
   --max-scan <n>     With --threads, how many messages to scan for thread
                      membership (default 1000)
-  --links            Print full URLs found in the body (snippets shorten them)
+  --links [all]      Print full URLs found in the body (snippets shorten them).
+                     Plain --links hides unsubscribe/tracking/footer links;
+                     "--links all" prints every URL, including those
 
 Messages are tagged from headers the mail system already set:
   spam       server flagged it (X-Spam-Flag / X-Spam-Status / X-Spam-Level)
@@ -93,6 +97,17 @@ Output:
   --json             Machine-readable JSON instead of text
   --no-snippet       Skip body preview (headers only, much faster)
   --snippet-len <n>  Snippet length in characters (default 300)
+
+Headers of one message:
+  --headers <ref>    Print the headers that say who sent it, whether it is
+                     authentic, and how to unsubscribe
+  --all-headers      With --headers: print every header, not just those
+
+Unsubscribing (the only mode that talks to a server other than IMAP):
+  --unsubscribe <ref>  Show the List-Unsubscribe options of a message. Sends
+                     nothing on its own
+  --yes              With --unsubscribe: actually send the one-click
+                     unsubscribe request (RFC 8058 senders only)
 
 Attachments (read-only, like every other read):
   --attachments <ref>  List attachments of one message, numbered from 1
@@ -139,6 +154,9 @@ function parseArgs(argv) {
 			case '--help': case '-h': opts.help = true; break;
 			case '--accounts': opts.listAccounts = true; break;
 			case '--body': opts.body = value(); break;
+			case '--headers': opts.headers = value(); break;
+			case '--all-headers': opts.allHeaders = true; break;
+			case '--unsubscribe': opts.unsubscribe = value(); break;
 			case '--since': opts.since = value(); break;
 			case '--until': opts.until = value(); break;
 			case '--date': opts.date = value(); break;
@@ -156,7 +174,9 @@ function parseArgs(argv) {
 			case '--limit': opts.limit = Number(value()); break;
 			case '--offset': opts.offset = Number(value()); break;
 			case '--max-scan': opts.maxScan = Number(value()); break;
-			case '--links': opts.links = true; break;
+			// The value is optional, so only the one word that means anything
+			// here is consumed - "--links --threads" must not eat the flag.
+			case '--links': opts.links = argv[i + 1] === 'all' ? (i++, 'all') : true; break;
 			case '--json': opts.json = true; break;
 			case '--no-snippet': opts.snippet = false; break;
 			case '--snippet-len': opts.snippetLen = Number(value()); break;
@@ -191,8 +211,13 @@ function parseArgs(argv) {
 		for (const ref of opts.deletes) parseRef(ref, '--delete');
 	}
 	if (opts.body) parseRef(opts.body, '--body');
+	if (opts.headers) parseRef(opts.headers, '--headers');
+	if (opts.unsubscribe) parseRef(opts.unsubscribe, '--unsubscribe');
+	if (opts.allHeaders && !opts.headers) throw new Error('--all-headers only applies to --headers');
 	if (opts.attachments) parseRef(opts.attachments, '--attachments');
 	if (opts.save) parseRef(opts.save, '--save');
+	// Links are read out of the body, so suppressing the body suppresses them.
+	if (opts.links && !opts.snippet) throw new Error('--links needs the message body, so it cannot be combined with --no-snippet');
 	if (opts.part !== undefined && (!Number.isInteger(opts.part) || opts.part < 1)) {
 		throw new Error('--part must be an attachment number from the --attachments listing (1, 2, ...)');
 	}
@@ -431,6 +456,9 @@ async function fetchFolder(client, account, folder, window, opts, isJunk = false
 			attachments: listAttachments(msg.bodyStructure).map(({ index, filename, type, size }) => ({ index, filename, type, size })),
 			size: msg.size,
 			textPart: findTextPart(msg.bodyStructure),
+			// Kept separately because a newsletter's text/plain alternative is
+			// often stripped of every URL - only the markup still has them.
+			htmlPart: findPart(msg.bodyStructure, 'text/html'),
 			messageId: firstId(headers['message-id']?.[0]),
 			references: collectIds(headers.references?.[0], headers['in-reply-to']?.[0]),
 		});
@@ -469,7 +497,7 @@ async function fillSnippets(accounts, messages, opts) {
 					const lock = await client.getMailboxLock(folder, { readOnly: true });
 					try {
 						for (const msg of group.filter((m) => m.folder === folder)) {
-							msg.snippet = await downloadSnippet(client, msg, opts.snippetLen);
+							msg.snippet = await downloadSnippet(client, msg, opts);
 						}
 					} finally {
 						lock.release();
@@ -550,27 +578,61 @@ function groupThreads(messages) {
 	}).sort((a, b) => b.latest.date - a.latest.date);
 }
 
-async function downloadSnippet(client, msg, length) {
-	if (!msg.textPart) return '';
+async function downloadSnippet(client, msg, opts) {
+	const length = opts.snippetLen;
+	if (!msg.textPart) {
+		if (opts.links) msg.links = []; // Read successfully; there is simply nothing.
+		return '';
+	}
+
 	try {
 		// Over-fetch: quoted text and markup get stripped, so raw bytes shrink.
-		const { meta, content } = await client.download(String(msg.uid), msg.textPart.part, {
-			uid: true,
-			maxBytes: Math.max(8192, length * 20),
-		});
-		if (!content) return '';
+		// Links are the exception - the unsubscribe link of a newsletter sits at
+		// the very bottom, so asking for links means fetching the whole part.
+		const budget = opts.links ? 1048576 : Math.max(8192, length * 20);
+		const { meta, raw } = await downloadPart(client, msg.uid, msg.textPart.part, budget);
+		if (raw === null) return '';
 
-		const chunks = [];
-		for await (const chunk of content) chunks.push(chunk);
-		const raw = Buffer.concat(chunks).toString('utf8');
-		const text = (meta?.contentType || msg.textPart.type) === 'text/html' ? htmlToText(raw) : raw;
+		const isHtml = (meta?.contentType || msg.textPart.type) === 'text/html';
+		const text = isHtml ? htmlToText(raw) : raw;
 
-		// Collect links from the full text before the snippet shortens them -
-		// a truncated URL is useless to open.
-		msg.links = extractLinks(text);
+		// Collect links from the full text before the snippet shortens them - a
+		// truncated URL is useless to open. Both sources are needed: in markup a
+		// URL lives in the href, which the text conversion drops on purpose (it
+		// would bury the words), and a newsletter's text/plain alternative is
+		// routinely stripped of every URL, so reading it alone reports that a
+		// mail full of links contains none.
+		if (opts.links) {
+			const markup = isHtml ? raw : await htmlOf(client, msg, budget);
+			const candidates = [...extractHrefs(markup), ...urlsIn(text)];
+			const { links, more } = selectLinks(candidates, { all: opts.links === 'all' });
+			msg.links = links;
+			msg.linksMore = more;
+		}
+
 		return truncate(cleanBody(text), length);
 	} catch {
 		return ''; // A snippet is a nice-to-have; never fail the listing over it.
+	}
+}
+
+/** Fetches one body part as a string. imapflow decodes encoding and charset. */
+async function downloadPart(client, uid, part, maxBytes) {
+	const { meta, content } = await client.download(String(uid), part, { uid: true, maxBytes });
+	if (!content) return { meta, raw: null };
+
+	const chunks = [];
+	for await (const chunk of content) chunks.push(chunk);
+	return { meta, raw: Buffer.concat(chunks).toString('utf8') };
+}
+
+/** The message's HTML alternative, when the body was read from a different part. */
+async function htmlOf(client, msg, maxBytes) {
+	if (!msg.htmlPart || msg.htmlPart.part === msg.textPart.part) return '';
+	try {
+		return (await downloadPart(client, msg.uid, msg.htmlPart.part, maxBytes)).raw ?? '';
+	} catch {
+		return ''; // The plain-text links found so far are still worth reporting.
 	}
 }
 
@@ -579,17 +641,60 @@ async function downloadSnippet(client, msg, length) {
 const NOISE_LINK = new RegExp([
 	'unsubscribe', 'sent_notifications', '/track', 'click', 'utm_', 'pixel',
 	'\\.(gif|png|jpg)(\\?|$)',
+	// Assets the markup pulls in - never something a reader opens.
+	'fonts\\.(googleapis|gstatic)\\.com', '\\.(css|js)(\\?|$)',
 	'/-/profile/', '/notifications$', '/help$', '/preferences', '/settings',
 ].join('|'), 'i');
 
-/** Picks the few links a reader would actually want to open. */
-function extractLinks(text, max = 3) {
-	const found = text.match(/https?:\/\/[^\s<>()[\]"']+/g) ?? [];
-	const clean = found
-		.map((url) => url.replace(/[.,;:]+$/, '')) // trailing sentence punctuation
-		.filter((url) => !NOISE_LINK.test(url));
+const urlsIn = (text) => text.match(/https?:\/\/[^\s<>()[\]"']+/g) ?? [];
 
-	return [...new Set(clean)].slice(0, max);
+/**
+ * Reads link targets out of the markup itself. html-to-text is configured to
+ * drop hrefs (inline URLs would crowd out the words), which leaves an HTML
+ * newsletter looking like it contains no links whatsoever - the reason a
+ * footer "unsubscribe here" used to be unreachable.
+ */
+function extractHrefs(html) {
+	const found = [];
+	for (const match of html.matchAll(/\bhref\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'>]+))/gi)) {
+		const url = decodeEntities(match[1] ?? match[2] ?? match[3] ?? '').trim();
+		if (/^https?:\/\//i.test(url)) found.push(url);
+	}
+	return found;
+}
+
+const NAMED_ENTITY = { amp: '&', lt: '<', gt: '>', quot: '"', apos: "'", nbsp: ' ' };
+
+/** Decodes the handful of entities that actually turn up inside an href. */
+function decodeEntities(text) {
+	return text.replace(/&(#x?[0-9a-f]+|[a-z]+);/gi, (match, body) => {
+		if (body[0] !== '#') return NAMED_ENTITY[body.toLowerCase()] ?? match;
+		const code = body[1] === 'x' || body[1] === 'X'
+			? parseInt(body.slice(2), 16)
+			: parseInt(body.slice(1), 10);
+		return Number.isFinite(code) && code > 0 ? String.fromCodePoint(code) : match;
+	});
+}
+
+/**
+ * Narrows a pile of URLs down to what a reader would want. `all` turns the
+ * filtering off entirely - the footer links it normally hides are exactly what
+ * someone asking "how do I unsubscribe from this" is after.
+ */
+function selectLinks(urls, { all = false, max = all ? 10 : 3 } = {}) {
+	const clean = urls
+		.map((url) => url.replace(/[.,;:]+$/, '')) // trailing sentence punctuation
+		.filter((url) => all || !NOISE_LINK.test(url));
+
+	const unique = [...new Set(clean)];
+	// Report what was cut rather than trimming in silence - an unsubscribe link
+	// that fell off the end would look exactly like a message that has none.
+	return { links: unique.slice(0, max), more: Math.max(0, unique.length - max) };
+}
+
+/** Picks the few links a reader would actually want to open. */
+function extractLinks(text, opts) {
+	return selectLinks(urlsIn(text), opts).links;
 }
 
 // Classification headers carry a verdict some other system already reached
@@ -601,22 +706,59 @@ const FETCH_HEADERS = [
 	'message-id', 'references', 'in-reply-to',
 ];
 
-/** Parses a raw header block into { lowercased-name: [values] }. */
-function parseHeaders(buffer) {
-	if (!buffer) return {};
+/**
+ * Splits a raw header block into fields, in the order the message carries them
+ * and with the sender's own capitalisation kept. Order matters when printing
+ * headers back: Received lines only make sense as a sequence.
+ */
+function headerLines(buffer) {
+	if (!buffer) return [];
 
-	const headers = {};
+	const fields = [];
 	// Unfold continuation lines (leading whitespace) before splitting fields.
 	const text = buffer.toString('utf8').replace(/\r\n/g, '\n').replace(/\n[ \t]+/g, ' ');
 
 	for (const line of text.split('\n')) {
 		const colon = line.indexOf(':');
 		if (colon < 1) continue;
-		const key = line.slice(0, colon).trim().toLowerCase();
-		(headers[key] ??= []).push(line.slice(colon + 1).trim());
+		const name = line.slice(0, colon).trim();
+		fields.push({ name, key: name.toLowerCase(), value: line.slice(colon + 1).trim() });
 	}
 
+	return fields;
+}
+
+/** Parses a raw header block into { lowercased-name: [values] }. */
+function parseHeaders(buffer) {
+	const headers = {};
+	for (const { key, value } of headerLines(buffer)) (headers[key] ??= []).push(value);
 	return headers;
+}
+
+const ENCODED_WORD = /=\?([^?]+)\?([bq])\?([^?]*)\?=/gi;
+
+/**
+ * Decodes RFC 2047 encoded words ("=?utf-8?B?...?="). imapflow decodes the
+ * envelope for us, but headers fetched raw still carry them - and a Czech
+ * subject or sender name is unreadable without this.
+ */
+function decodeWords(value) {
+	// Adjacent encoded words are one string that was split to fit the line
+	// length; the whitespace between them is not part of the text, and a
+	// multi-byte character can straddle the seam, so join before decoding.
+	return value
+		.replace(/(\?=)\s+(?==\?)/g, '$1')
+		.replace(ENCODED_WORD, (match, charset, encoding, data) => {
+			try {
+				const bytes = encoding.toLowerCase() === 'b'
+					? Buffer.from(data, 'base64')
+					// Quoted-printable, plus the RFC 2047 rule that _ means space.
+					: Buffer.from(data.replace(/_/g, ' ').replace(/=([0-9a-f]{2})/gi, (m, hex) => String.fromCharCode(parseInt(hex, 16))), 'binary');
+				return new TextDecoder(charset).decode(bytes);
+			} catch {
+				return match; // Unknown charset or broken base64: show it as sent.
+			}
+		});
 }
 
 /**
@@ -653,26 +795,27 @@ function classify(headers, inJunkFolder = false) {
 	return tags;
 }
 
-/** Walks the BODYSTRUCTURE tree for the first displayable text part. */
-function findTextPart(node) {
+/** Walks the BODYSTRUCTURE tree for the first part of the wanted MIME type. */
+function findPart(node, wanted) {
 	if (!node) return null;
 
-	const walk = (n, wanted) => {
-		if (!n) return null;
-		const type = (n.type || '').toLowerCase();
-		const isAttachment = (n.disposition || '').toLowerCase() === 'attachment';
-		if (type === wanted && !isAttachment) {
-			// A non-multipart message has no part number; its body is part 1.
-			return { part: n.part || '1', type };
-		}
-		for (const child of n.childNodes || []) {
-			const hit = walk(child, wanted);
-			if (hit) return hit;
-		}
-		return null;
-	};
+	const type = (node.type || '').toLowerCase();
+	const isAttachment = (node.disposition || '').toLowerCase() === 'attachment';
+	if (type === wanted && !isAttachment) {
+		// A non-multipart message has no part number; its body is part 1.
+		return { part: node.part || '1', type };
+	}
 
-	return walk(node, 'text/plain') || walk(node, 'text/html');
+	for (const child of node.childNodes || []) {
+		const hit = findPart(child, wanted);
+		if (hit) return hit;
+	}
+	return null;
+}
+
+/** The part to read a message from: plain text if the sender provided it. */
+function findTextPart(node) {
+	return findPart(node, 'text/plain') || findPart(node, 'text/html');
 }
 
 function hasAttachment(node) {
@@ -837,9 +980,12 @@ const fmtDateTime = (d) => `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.
 
 // ------------------------------------------------------------------ output
 
+// How many of a thread's newest messages get a body preview. See printThread.
+const THREAD_SNIPPETS = 2;
+
 function printDigest(messages, errors, window, opts, threads = null) {
 	if (opts.json) {
-		const plain = (m) => ({ ...m, date: m.date.toISOString(), textPart: undefined });
+		const plain = (m) => ({ ...m, date: m.date.toISOString(), textPart: undefined, htmlPart: undefined });
 		console.log(JSON.stringify({
 			window: { from: window.from.toISOString(), until: window.until?.toISOString() ?? null, label: window.label },
 			count: messages.length,
@@ -852,6 +998,7 @@ function printDigest(messages, errors, window, opts, threads = null) {
 						unread: t.unread,
 						participants: t.participants,
 						latest: plain(t.latest),
+						recent: t.messages.slice(0, THREAD_SNIPPETS).map(plain),
 						refs: t.messages.map((m) => m.ref),
 					})),
 				}
@@ -879,12 +1026,33 @@ function printMessage(msg, opts) {
 	console.log(`${fmtDateTime(msg.date)} | ${msg.from}`);
 	console.log(`  ${msg.subject}${flags.length ? `  [${flags.join(', ')}]` : ''}`);
 	if (msg.snippet) console.log(`  > ${msg.snippet}`);
-	if (opts.links && msg.links?.length) console.log(`  links: ${msg.links.join(' ')}`);
+	if (opts.links) printLinks(msg);
 	if (msg.attachments.length) {
 		const list = msg.attachments.map((a) => `[${a.index}] ${a.filename || '(unnamed)'} ${fmtSize(a.size)}`).join(', ');
 		console.log(`  attachments: ${list}`);
 	}
 	console.log(`  ref=${msg.ref}`);
+}
+
+/**
+ * Says what was found even when that is nothing. Asking for links and getting
+ * a blank line back cannot be told apart from a body that failed to download,
+ * so each case names itself.
+ */
+function printLinks(msg) {
+	if (!msg.links) {
+		console.log('  links: (body could not be read)');
+		return;
+	}
+	if (!msg.links.length) {
+		console.log('  links: (none in this message)');
+		return;
+	}
+
+	// One per line: a newsletter's tracking URLs are long enough that a joined
+	// line cannot be read, let alone copied.
+	console.log(msg.links.length === 1 ? `  links: ${msg.links[0]}` : `  links:\n${msg.links.map((url) => `    ${url}`).join('\n')}`);
+	if (msg.linksMore) console.log(`    (+${msg.linksMore} more - all of them: --body ${msg.ref} --links all)`);
 }
 
 /**
@@ -900,14 +1068,20 @@ function printThread(thread, opts) {
 	console.log(`${span} | ${messages.length} msg${messages.length > 1 ? 's' : ''}`);
 	console.log(`  ${latest.subject.replace(/^((Re|Fwd|FW|RE|Odp)\s*:\s*)+/i, '')}${flags.length ? `  [${flags.join(', ')}]` : ''}`);
 	console.log(`  ${participants.join(', ')}`);
-	if (latest.snippet) {
+	// Systems like GitLab send a status notification (assigned, closed) on top of
+	// the message that caused it, so the newest message in a thread is often the
+	// one that says least - an eleven-message discussion summarized as
+	// "Reassigned Issue 550". Showing the two newest keeps the actual content
+	// visible whichever order they arrived in.
+	for (const msg of messages.slice(0, THREAD_SNIPPETS)) {
+		if (!msg.snippet) continue;
 		// Name the speaker only when the thread has several, so it is clear who
 		// had the last word; on a single message the sender is already above.
-		const speaker = messages.length > 1 ? `${latest.from.replace(/\s*<[^>]*>$/, '')}: ` : '';
-		console.log(`  > ${speaker}${latest.snippet}`);
+		const speaker = messages.length > 1 ? `${msg.from.replace(/\s*<[^>]*>$/, '')}: ` : '';
+		console.log(`  > ${speaker}${msg.snippet}`);
 	}
 
-	if (opts.links && latest.links?.length) console.log(`  links: ${latest.links.join(' ')}`);
+	if (opts.links) printLinks(latest);
 
 	const attachments = messages.flatMap((m) => m.attachments.map((a) => `${a.filename || '(unnamed)'} ${fmtSize(a.size)}`));
 	if (attachments.length) console.log(`  attachments: ${[...new Set(attachments)].join(', ')}`);
@@ -1105,7 +1279,155 @@ async function handleAttachments(accounts, ref, opts) {
 	});
 }
 
-async function showBody(accounts, ref) {
+// The headers that answer a question someone actually asks about a message:
+// who really sent it, is that provable, what conversation is it part of, and
+// how does one get off this list. Everything else is delivery plumbing and
+// needs --all-headers.
+const NOTABLE_HEADERS = new Set([
+	'from', 'sender', 'reply-to', 'to', 'cc', 'bcc', 'return-path', 'delivered-to',
+	'date', 'subject', 'message-id', 'in-reply-to', 'references',
+	'auto-submitted', 'precedence', 'importance', 'x-priority', 'x-mailer',
+	'organization', 'content-type',
+]);
+
+// Whole families are worth printing: every List-* header is unsubscribe or
+// list-identity information, and the spam/authentication ones carry verdicts.
+const NOTABLE_PREFIX = /^(list-|x-spam|authentication-results|received-spf|arc-authentication)/;
+
+const isNotable = (key) => NOTABLE_HEADERS.has(key) || NOTABLE_PREFIX.test(key);
+
+/** Prints one message's headers. Fetches only the header block, not the body. */
+async function showHeaders(accounts, ref, opts) {
+	const { accountName, folder, uid } = parseRef(ref, '--headers');
+	const account = resolveAccount(accounts, accountName);
+
+	await withClient(account, async (client) => {
+		const lock = await client.getMailboxLock(folder, { readOnly: true });
+		try {
+			const msg = await client.fetchOne(uid, { headers: true }, { uid: true });
+			if (!msg?.headers) throw new Error(`Message ${ref} not found`);
+
+			const all = headerLines(msg.headers);
+			const shown = opts.allHeaders ? all : all.filter((h) => isNotable(h.key));
+			for (const { name, value } of shown) console.log(`${name}: ${decodeWords(value)}`);
+
+			const hidden = all.length - shown.length;
+			if (hidden) console.log(`\n(${hidden} more header(s) - add --all-headers)`);
+		} finally {
+			lock.release();
+		}
+	});
+}
+
+/**
+ * Reads List-Unsubscribe into the choices it actually offers. The header holds
+ * angle-bracketed targets, usually one https URL and one mailto.
+ */
+function parseUnsubscribe(headers) {
+	const raw = (headers['list-unsubscribe'] || []).join(', ');
+	const targets = [...raw.matchAll(/<([^>]+)>/g)].map((m) => m[1].trim());
+
+	return {
+		http: targets.filter((t) => /^https?:\/\//i.test(t)),
+		mailto: targets.filter((t) => /^mailto:/i.test(t)),
+		// RFC 8058. Only this exact opt-in promises that a bare POST unsubscribes
+		// with no further interaction; without it the URL is just a link, and
+		// requesting it might do nothing, or might only confirm the address.
+		oneClick: /list-unsubscribe\s*=\s*one-click/i.test((headers['list-unsubscribe-post'] || [])[0] || ''),
+	};
+}
+
+/**
+ * Shows how to get off a mailing list, and with --yes performs the one-click
+ * request. This is the only place the tool contacts anything but the IMAP
+ * server, so it stays deliberately narrow: an RFC 8058 POST over https and
+ * nothing else. There is no SMTP here, so a mailto: option can only be printed.
+ */
+async function unsubscribe(accounts, ref, opts) {
+	const { accountName, folder, uid } = parseRef(ref, '--unsubscribe');
+	const account = resolveAccount(accounts, accountName);
+
+	const message = await withClient(account, async (client) => {
+		const lock = await client.getMailboxLock(folder, { readOnly: true });
+		try {
+			const msg = await client.fetchOne(uid, { headers: true, envelope: true }, { uid: true });
+			if (!msg?.headers) throw new Error(`Message ${ref} not found`);
+
+			const headers = parseHeaders(msg.headers);
+			return {
+				subject: msg.envelope?.subject || '(no subject)',
+				from: formatAddress(msg.envelope?.from?.[0]),
+				// Gmail states its spam verdict only by filing the message in Junk,
+				// and that is exactly the case this guards against.
+				tags: classify(headers, /spam|junk|nevyžádan/i.test(folder)),
+				...parseUnsubscribe(headers),
+			};
+		} finally {
+			lock.release();
+		}
+	});
+
+	console.log(`${message.from}`);
+	console.log(`${message.subject}${message.tags.length ? `  [${message.tags.join(', ')}]` : ''}`);
+
+	if (!message.http.length && !message.mailto.length) {
+		console.log('\nNo List-Unsubscribe header - this sender offers no machine-readable opt-out.');
+		console.log(`Look for a footer link instead: --body ${ref} --links all`);
+		process.exitCode = 1;
+		return;
+	}
+
+	console.log('\nList-Unsubscribe:');
+	for (const url of message.http) console.log(`  ${url}${message.oneClick ? '  [one-click]' : ''}`);
+	for (const address of message.mailto) console.log(`  ${address}  [needs an e-mail - this tool has no SMTP]`);
+
+	if (!opts.yes) {
+		console.log('\nNothing was sent. Add --yes to submit the one-click request'
+			+ `${message.oneClick ? '' : ' (this sender does not support it - the URL has to be opened in a browser)'}.`);
+		return;
+	}
+
+	// A spam or forged sender learns one thing from an unsubscribe: that the
+	// address is real and read. That is worth more to them than the mail costs.
+	const risky = message.tags.filter((tag) => tag === 'spam' || tag === 'auth-fail');
+	if (risky.length) {
+		console.log(`\n! refusing: this message is tagged [${risky.join(', ')}]. Unsubscribing would confirm that your`);
+		console.log('  address is live and read, to a sender the mail system already distrusts - which is worth');
+		console.log('  more to them than the mail costs you. Delete it or mark it as spam instead.');
+		process.exitCode = 1;
+		return;
+	}
+
+	const target = message.http.find((url) => /^https:\/\//i.test(url));
+	if (!message.oneClick || !target) {
+		console.log('\n! refusing: no RFC 8058 one-click https target.');
+		console.log('  Without it a request may not unsubscribe anything - open the URL above in a browser.');
+		process.exitCode = 1;
+		return;
+	}
+
+	try {
+		const response = await fetch(target, {
+			method: 'POST',
+			headers: { 'content-type': 'application/x-www-form-urlencoded' },
+			body: 'List-Unsubscribe=One-Click',
+			redirect: 'follow',
+			signal: AbortSignal.timeout(30e3),
+		});
+
+		if (response.ok) {
+			console.log(`\nunsubscribed: POST ${target} -> ${response.status} ${response.statusText}`);
+		} else {
+			console.log(`\n! the sender rejected the request: ${response.status} ${response.statusText}`);
+			process.exitCode = 1;
+		}
+	} catch (err) {
+		console.log(`\n! could not reach the unsubscribe endpoint: ${err.message}`);
+		process.exitCode = 1;
+	}
+}
+
+async function showBody(accounts, ref, opts) {
 	const { accountName, folder, uid } = parseRef(ref, '--body');
 	const account = resolveAccount(accounts, accountName);
 
@@ -1129,6 +1451,19 @@ async function showBody(accounts, ref) {
 			}
 			console.log('');
 			console.log(parsed.text?.trim() || htmlToText(parsed.html || '').trim() || '(empty body)');
+
+			if (opts.links) {
+				// Both sources: the plain-text alternative rarely carries the
+				// footer links, and the HTML keeps them in href attributes only.
+				const candidates = [...extractHrefs(parsed.html || ''), ...urlsIn(parsed.text || '')];
+				// One message, asked for by ref: no reason to hold anything back.
+				// The digest is the place that shortens, and it points here.
+				const { links } = selectLinks(candidates, { all: opts.links === 'all', max: Infinity });
+				console.log('');
+				console.log(links.length
+					? `links:\n${links.map((url) => `  ${url}`).join('\n')}`
+					: 'links: (none in this message)');
+			}
 		} finally {
 			lock.release();
 		}
@@ -1166,8 +1501,18 @@ async function main() {
 		return;
 	}
 
+	if (opts.unsubscribe) {
+		await unsubscribe(allAccounts, opts.unsubscribe, opts);
+		return;
+	}
+
+	if (opts.headers) {
+		await showHeaders(allAccounts, opts.headers, opts);
+		return;
+	}
+
 	if (opts.body) {
-		await showBody(allAccounts, opts.body);
+		await showBody(allAccounts, opts.body, opts);
 		return;
 	}
 
@@ -1228,9 +1573,9 @@ async function main() {
 	}
 
 	// Only what is actually printed deserves a body download - and in thread
-	// mode that is just the newest message of each conversation.
+	// mode that is just the newest few messages of each conversation.
 	if (opts.snippet) {
-		await fillSnippets(selected, threads ? threads.map((t) => t.latest) : shown, opts);
+		await fillSnippets(selected, threads ? threads.flatMap((t) => t.messages.slice(0, THREAD_SNIPPETS)) : shown, opts);
 	}
 
 	printDigest(shown, errors, window ?? resolveWindow(opts, null), opts, threads);
@@ -1252,6 +1597,8 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
 export {
 	parseArgs, parseRef, relativeTo, resolveWindow, normalizeAccounts,
 	cleanBody, htmlToText, truncate, findTextPart, hasAttachment, formatAddress,
-	listAttachments, safeFilename, uniquePath, fmtSize,
-	parseHeaders, classify, buildQuery, groupThreads, collectIds, firstId, extractLinks,
+	listAttachments, safeFilename, uniquePath, fmtSize, findPart,
+	parseHeaders, headerLines, decodeWords, classify, buildQuery, groupThreads,
+	collectIds, firstId, extractLinks, extractHrefs, selectLinks, decodeEntities,
+	parseUnsubscribe,
 };

@@ -6,7 +6,9 @@ import {
 	parseArgs, parseRef, relativeTo, resolveWindow, normalizeAccounts,
 	cleanBody, htmlToText, truncate, findTextPart, hasAttachment, formatAddress,
 	listAttachments, safeFilename, uniquePath, fmtSize,
-	parseHeaders, classify, buildQuery, groupThreads, collectIds, firstId, extractLinks,
+	parseHeaders, headerLines, decodeWords, classify, buildQuery, groupThreads,
+	collectIds, firstId, extractLinks, extractHrefs, selectLinks, decodeEntities,
+	parseUnsubscribe,
 } from './ClaudeMail.js';
 
 // --- search -----------------------------------------------------------------
@@ -165,6 +167,117 @@ test('extractLinks trims punctuation, dedupes and caps the count', () => {
 	assert.deepEqual(extractLinks('bez odkazu'), []);
 });
 
+const headersOf = (raw) => parseHeaders(Buffer.from(raw.replace(/\n/g, '\r\n'), 'utf8'));
+
+test('extractHrefs recovers the URLs html-to-text throws away', () => {
+	// The failure this exists for: an HTML newsletter whose "unsubscribe here"
+	// becomes plain text, leaving the reader with a label and no target.
+	const html = '<p>Nechcete-li dostávat novinky, <a class="f" href="https://kosmas.cz/opt-out?id=9&amp;u=x">'
+		+ 'odhlaste se zde</a>.</p><a href=\'https://kosmas.cz/kniha/1\'>Kniha</a>'
+		+ '<a href=https://kosmas.cz/bare>bez uvozovek</a><a href="mailto:info@kosmas.cz">napište</a>'
+		+ '<a href="#kotva">nahoru</a>';
+
+	assert.deepEqual(extractHrefs(html), [
+		'https://kosmas.cz/opt-out?id=9&u=x', // entity decoded
+		'https://kosmas.cz/kniha/1',
+		'https://kosmas.cz/bare',
+	]);
+	// A mail with no anchors at all must not invent any.
+	assert.deepEqual(extractHrefs('<p>jen text</p>'), []);
+});
+
+test('decodeEntities handles the forms that appear in hrefs', () => {
+	assert.equal(decodeEntities('a&amp;b&#61;c&#x3D;d'), 'a&b=c=d');
+	assert.equal(decodeEntities('nic k dekódování'), 'nic k dekódování');
+	assert.equal(decodeEntities('&nosuchentity;'), '&nosuchentity;'); // left alone
+});
+
+test('selectLinks: "all" keeps the footer links the default hides', () => {
+	const urls = [
+		'https://firma.cz/akce',
+		'https://firma.cz/-/unsubscribe/abc',
+		'https://firma.cz/preferences',
+	];
+
+	// The default is a reading aid, so unsubscribe/settings links are noise.
+	assert.deepEqual(selectLinks(urls).links, ['https://firma.cz/akce']);
+	// Asking for all of them is asking for exactly those.
+	assert.deepEqual(selectLinks(urls, { all: true }).links, urls);
+});
+
+test('selectLinks reports what it cut instead of dropping it silently', () => {
+	const many = Array.from({ length: 8 }, (_, i) => `https://a.cz/${i}`);
+	const { links, more } = selectLinks(many, { max: 3 });
+	assert.equal(links.length, 3);
+	assert.equal(more, 5);
+	assert.equal(selectLinks(many, { max: 30 }).more, 0);
+});
+
+test('--links takes an optional "all", without eating the next flag', () => {
+	assert.equal(parseArgs(['--links']).links, true);
+	assert.equal(parseArgs(['--links', 'all']).links, 'all');
+	assert.equal(parseArgs(['--links', 'all', '--threads']).threads, true);
+
+	// The value is optional, so a following flag must survive.
+	const opts = parseArgs(['--links', '--threads']);
+	assert.equal(opts.links, true);
+	assert.equal(opts.threads, true);
+
+	// Links are read out of the body, so suppressing it is a contradiction.
+	assert.throws(() => parseArgs(['--links', '--no-snippet']), /cannot be combined with --no-snippet/);
+});
+
+test('header arguments are validated up front', () => {
+	assert.throws(() => parseArgs(['--headers', 'nope']), /expects <account>/);
+	assert.throws(() => parseArgs(['--all-headers']), /only applies to --headers/);
+	assert.throws(() => parseArgs(['--unsubscribe', 'a:b']), /expects <account>/);
+
+	assert.equal(parseArgs(['--headers', 'gmail:INBOX:5', '--all-headers']).allHeaders, true);
+	assert.equal(parseArgs(['--unsubscribe', 'gmail:INBOX:5']).unsubscribe, 'gmail:INBOX:5');
+	// Unlike --delete, --unsubscribe is readable without --yes; --yes only arms it.
+	assert.equal(parseArgs(['--unsubscribe', 'gmail:INBOX:5']).yes, undefined);
+});
+
+test('headerLines keeps order and the sender\'s own capitalisation', () => {
+	const fields = headerLines(Buffer.from('Received: from a\r\nReceived: from b\r\nX-Spam-Flag: NO\r\n', 'utf8'));
+
+	assert.deepEqual(fields.map((f) => f.value), ['from a', 'from b', 'NO']);
+	assert.equal(fields[2].name, 'X-Spam-Flag'); // as sent
+	assert.equal(fields[2].key, 'x-spam-flag');  // for lookups
+	assert.deepEqual(headerLines(null), []);
+});
+
+test('decodeWords turns encoded headers back into readable text', () => {
+	assert.equal(decodeWords('=?utf-8?B?UMWZw61sacWhIMW+bHXFpW91xI1rw70=?='), 'Příliš žluťoučký');
+	assert.equal(decodeWords('=?utf-8?Q?Faktura_za_kv=C4=9Bten?='), 'Faktura za květen');
+	assert.equal(decodeWords('=?iso-8859-2?Q?Mal=FD?='), 'Malý'); // charset other than utf-8
+
+	// Long values arrive split into adjacent words; a multi-byte character can
+	// straddle the seam, so the pieces have to be joined before decoding.
+	assert.equal(decodeWords('=?utf-8?B?UMWZw61s?= =?utf-8?B?acWhIA==?='), 'Příliš ');
+
+	// Plain text and undecodable values are passed through untouched.
+	assert.equal(decodeWords('Re: schuzka v patek'), 'Re: schuzka v patek');
+	assert.equal(decodeWords('=?nonsense-charset?B?QQ==?='), '=?nonsense-charset?B?QQ==?=');
+});
+
+test('parseUnsubscribe separates the options a message offers', () => {
+	const headers = headersOf('List-Unsubscribe: <https://a.cz/u/1>,\n <mailto:leave@a.cz?subject=unsub>\n'
+		+ 'List-Unsubscribe-Post: List-Unsubscribe=One-Click\n');
+	const parsed = parseUnsubscribe(headers);
+
+	assert.deepEqual(parsed.http, ['https://a.cz/u/1']);
+	assert.deepEqual(parsed.mailto, ['mailto:leave@a.cz?subject=unsub']);
+	assert.equal(parsed.oneClick, true);
+
+	// Without RFC 8058 the URL is just a link - posting to it promises nothing.
+	assert.equal(parseUnsubscribe(headersOf('List-Unsubscribe: <https://a.cz/u/1>\n')).oneClick, false);
+
+	const none = parseUnsubscribe(headersOf('From: a@b.cz\n'));
+	assert.deepEqual(none.http, []);
+	assert.deepEqual(none.mailto, []);
+});
+
 test('paging arguments are validated', () => {
 	assert.throws(() => parseArgs(['--max-scan', '0']), /--max-scan must be a positive/);
 	assert.equal(parseArgs([]).maxScan, 1000);
@@ -176,8 +289,6 @@ test('paging arguments are validated', () => {
 	assert.equal(parseArgs(['--from', 'novak']).sender, 'novak');
 	assert.equal(parseArgs(['--threads']).threads, true);
 });
-
-const headersOf = (raw) => parseHeaders(Buffer.from(raw.replace(/\n/g, '\r\n'), 'utf8'));
 
 test('parseHeaders unfolds continuation lines and lowercases names', () => {
 	const headers = headersOf('List-Unsubscribe: <https://a.cz/u>,\n <mailto:u@a.cz>\nX-Spam-Flag: NO\n');
