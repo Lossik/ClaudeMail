@@ -1,0 +1,22 @@
+{
+  "accounts": [
+    {
+      "name": "gmail",
+      "host": "imap.gmail.com",
+      "port": 993,
+      "secure": true,
+      "user": "vas.email@gmail.com",
+      "pass": "xxxx xxxx xxxx xxxx",
+      "folders": ["INBOX"]
+    },
+    {
+      "name": "work",
+      "host": "imap.firma.cz",
+      "port": 993,
+      "secure": true,
+      "user": "jmeno@firma.cz",
+      "passEnv": "WORK_MAIL_PASS",
+      "folders": ["INBOX"]
+    }
+  ]
+}

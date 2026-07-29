@@ -1,0 +1,17 @@
+{
+  "name": "claudemail",
+  "version": "1.0.0",
+  "description": "Read-only IMAP mail digest for Claude Code",
+  "type": "module",
+  "main": "ClaudeMail.js",
+  "license": "MIT",
+  "private": true,
+  "scripts": {
+    "test": "node --test"
+  },
+  "dependencies": {
+    "html-to-text": "^9.0.5",
+    "imapflow": "^1.6.3",
+    "mailparser": "^3.7.4"
+  }
+}
