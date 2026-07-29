@@ -92,6 +92,7 @@ node ClaudeMail.js --since 1w --text invoice
 node ClaudeMail.js --since 1d --limit 50 --offset 50   # next page
 node ClaudeMail.js --since 6h                 # last 6 hours (m/h/d/w)
 node ClaudeMail.js --date 2026-07-20          # one specific day
+node ClaudeMail.js --since 2026-07-15 --until 2026-07-20   # a date range
 node ClaudeMail.js --since-last               # since the last successful check
 node ClaudeMail.js --since 1d --unread        # unread only
 node ClaudeMail.js --subject invoice          # subject filter
@@ -206,6 +207,14 @@ links are omitted.
 
 Body previews are downloaded only after the global sort and trim — and in
 `--threads` mode, only for the latest message of each conversation.
+
+### Time window
+
+`--since` takes either a relative spec (`90m`, `6h`, `2d`, `1w`) or an absolute
+`YYYY-MM-DD`. `--until` closes the range from the other end and accepts the same
+two forms, so both `--since 2026-07-15 --until 2026-07-20` and
+`--since 30d --until 7d` work. An end *date* is inclusive of that whole day.
+`--date` remains the shorthand for a single day.
 
 ## Implementation notes
 

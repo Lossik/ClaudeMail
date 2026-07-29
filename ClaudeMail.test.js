@@ -293,6 +293,31 @@ test('--date resolves to exactly one local calendar day', () => {
 	assert.throws(() => resolveWindow({ date: '20.7.2026' }, null), /YYYY-MM-DD/);
 });
 
+test('--since accepts an absolute date, --until closes the range', () => {
+	const { from, until, label } = resolveWindow({ since: '2026-07-15', until: '2026-07-20' }, null);
+	assert.equal(from.getDate(), 15);
+	assert.equal(from.getHours(), 0);
+	// --until is inclusive of that day, so the exclusive bound is the 21st.
+	assert.equal(until.getDate(), 21);
+	assert.equal(until.getHours(), 0);
+	assert.match(label, /2026-07-15 \.\. 2026-07-20/);
+});
+
+test('--until also works relative, and rejects an inverted range', () => {
+	const { from, until } = resolveWindow({ since: '30d', until: '7d' }, null);
+	assert.ok(from < until); // 30 days ago .. 7 days ago
+	assert.ok(Math.abs((Date.now() - until.getTime()) - 7 * 86400e3) < 1000);
+
+	assert.throws(() => resolveWindow({ since: '7d', until: '30d' }, null), /not after/);
+	assert.throws(() => resolveWindow({ since: '2026-07-20', until: '2026-07-15' }, null), /not after/);
+});
+
+test('--until is rejected where a range makes no sense', () => {
+	assert.throws(() => parseArgs(['--date', '2026-07-20', '--until', '2026-07-25']), /cannot be combined with --date/);
+	assert.throws(() => parseArgs(['--since-last', '--until', '2026-07-25']), /cannot be combined with --since-last/);
+	assert.throws(() => parseArgs(['--since', '2026-13-01']), /Invalid date/);
+});
+
 test('--since-last uses the checkpoint, and falls back on the first run', () => {
 	const checkpoint = '2026-07-28T10:00:00.000Z';
 	const withState = resolveWindow({ sinceLast: true }, checkpoint);

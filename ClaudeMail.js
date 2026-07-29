@@ -53,7 +53,8 @@ Usage:
   node ClaudeMail.js --accounts
 
 Selection (default: --since 1d):
-  --since <spec>     Relative window: 90m, 6h, 2d, 1w
+  --since <spec>     Start of the window: 90m, 6h, 2d, 1w, or YYYY-MM-DD
+  --until <spec>     End of the window - use with --since for a date range
   --date <YYYY-MM-DD>  Single calendar day
   --since-last       Since the last successful run (per account); records
                      a new checkpoint only if the run succeeds
@@ -139,6 +140,7 @@ function parseArgs(argv) {
 			case '--accounts': opts.listAccounts = true; break;
 			case '--body': opts.body = value(); break;
 			case '--since': opts.since = value(); break;
+			case '--until': opts.until = value(); break;
 			case '--date': opts.date = value(); break;
 			case '--since-last': opts.sinceLast = true; break;
 			case '--account': case '-a': opts.accounts.push(value()); break;
@@ -178,7 +180,12 @@ function parseArgs(argv) {
 
 	// Validate up front, before any config loading or network access, so a
 	// mistyped argument reports itself instead of some later failure.
-	if (opts.since) relativeTo(opts.since);
+	if (opts.since) pointInTime(opts.since, '--since');
+	if (opts.until) {
+		pointInTime(opts.until, '--until');
+		if (opts.date) throw new Error('--until cannot be combined with --date (a single day is already a closed range)');
+		if (opts.sinceLast) throw new Error('--until cannot be combined with --since-last');
+	}
 	if (opts.deletes.length) {
 		if (!opts.yes) throw new Error('--delete also requires --yes (guard against deleting mail by accident)');
 		for (const ref of opts.deletes) parseRef(ref, '--delete');
@@ -196,13 +203,12 @@ function parseArgs(argv) {
 	return opts;
 }
 
+const DATE_ONLY = /^\d{4}-\d{2}-\d{2}$/;
+
 /** Resolves the selection options into a { from, until } time window. */
 function resolveWindow(opts, checkpoint) {
 	if (opts.date) {
-		if (!/^\d{4}-\d{2}-\d{2}$/.test(opts.date)) throw new Error('--date expects YYYY-MM-DD');
-		const [y, m, d] = opts.date.split('-').map(Number);
-		const from = new Date(y, m - 1, d);
-		if (Number.isNaN(from.getTime())) throw new Error(`Invalid date: ${opts.date}`);
+		const from = parseDay(opts.date, '--date');
 		const until = new Date(from);
 		until.setDate(until.getDate() + 1);
 		return { from, until, label: `day ${opts.date}` };
@@ -215,12 +221,35 @@ function resolveWindow(opts, checkpoint) {
 	}
 
 	const spec = opts.since || '1d';
-	return { from: relativeTo(spec), until: null, label: `last ${spec}` };
+	const from = pointInTime(spec, '--since');
+
+	if (!opts.until) return { from, until: null, label: DATE_ONLY.test(spec) ? `since ${spec}` : `last ${spec}` };
+
+	// An end date means "up to and including that day", so the exclusive
+	// boundary is the following midnight.
+	let until = pointInTime(opts.until, '--until');
+	if (DATE_ONLY.test(opts.until)) until.setDate(until.getDate() + 1);
+	if (until <= from) throw new Error(`--until (${opts.until}) is not after --since (${spec})`);
+
+	return { from, until, label: `${spec} .. ${opts.until}` };
+}
+
+/** Accepts either a relative spec (6h, 2d) or an absolute YYYY-MM-DD. */
+function pointInTime(spec, flag) {
+	return DATE_ONLY.test(spec) ? parseDay(spec, flag) : relativeTo(spec);
+}
+
+function parseDay(value, flag) {
+	if (!DATE_ONLY.test(value)) throw new Error(`${flag} expects YYYY-MM-DD`);
+	const [y, m, d] = value.split('-').map(Number);
+	const day = new Date(y, m - 1, d);
+	if (Number.isNaN(day.getTime()) || day.getMonth() !== m - 1) throw new Error(`Invalid date: ${value}`);
+	return day;
 }
 
 function relativeTo(spec) {
 	const match = /^(\d+)\s*([mhdw])$/.exec(spec.trim().toLowerCase());
-	if (!match) throw new Error(`Invalid time spec: ${spec} (expected e.g. 90m, 6h, 2d, 1w)`);
+	if (!match) throw new Error(`Invalid time spec: ${spec} (expected e.g. 90m, 6h, 2d, 1w or YYYY-MM-DD)`);
 	const unitMs = { m: 60e3, h: 3600e3, d: 86400e3, w: 7 * 86400e3 };
 	return new Date(Date.now() - Number(match[1]) * unitMs[match[2]]);
 }
