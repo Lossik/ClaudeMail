@@ -1,37 +1,37 @@
 # ClaudeMail
 
-A small IMAP tool for [Claude Code](https://claude.com/claude-code): it fetches
-headers plus a body preview of recent mail and prints them compactly, so an
-assistant can summarize *who wrote what*.
+*Read this in [English](README.en.md).*
 
-Reading is strictly read-only — mailboxes are opened with `EXAMINE`, so nothing
-is marked as seen. The only operations that write to the mailbox are an explicit
-`--delete` or `--move`, and the only one that contacts anything but the IMAP
-server is `--unsubscribe --yes`. **There is no SMTP**: the tool cannot send or
-reply to mail.
+Malý IMAP nástroj pro [Claude Code](https://claude.com/claude-code): stáhne
+hlavičky a náhled těla nedávné pošty a vypíše je kompaktně, aby asistent mohl
+shrnout, *kdo co píše*.
 
-## Layout
+Čtení je striktně read-only — schránky se otevírají přes `EXAMINE`, takže se nic
+neoznačí jako přečtené. Jediné operace, které do schránky zapisují, jsou výslovné
+`--delete` nebo `--move`, a jediná, která kontaktuje něco jiného než IMAP server,
+je `--unsubscribe --yes`. **SMTP tu není**: nástroj neumí odeslat ani odpovědět.
 
-This repository is the **development checkout**; the installed copy lives
-elsewhere:
+## Rozvržení
 
-| What | Where |
+Tenhle repozitář je **vývojový checkout**; nainstalovaná kopie leží jinde:
+
+| Co | Kde |
 |---|---|
-| Launcher | `~\.local\bin\ClaudeMail.cmd` (the only thing on `PATH`) |
-| Program + dependencies | `~\.local\ClaudeMail\` |
-| Config and checkpoint | `~\.claudemail\` |
+| Spouštěč | `~\.local\bin\ClaudeMail.cmd` (jediná věc na `PATH`) |
+| Program a závislosti | `~\.local\ClaudeMail\` |
+| Konfigurace a checkpoint | `~\.claudemail\` |
 
-`~\.local\bin` holds **only a thin wrapper** — no program files, no
-`node_modules`. The program keeps its own directory with its own `package.json`,
-so it cannot affect other scripts sharing `PATH` (a stray `package.json` with
-`type: module` would break any CommonJS script next to it).
+V `~\.local\bin` je **jen tenká obálka** — žádné soubory programu, žádné
+`node_modules`. Program má vlastní adresář s vlastním `package.json`, takže
+nemůže ovlivnit ostatní skripty sdílející `PATH` (zatoulaný `package.json`
+s `type: module` by rozbil kterýkoli CommonJS skript vedle sebe).
 
-The config is looked up in this order: `$CLAUDEMAIL_CONFIG` → `config.json` next
-to the script → `~\.claudemail\config.json`. The installation therefore keeps no
-credentials beside the executable, while a checkout can hold its own
-`config.json` for development. `.state.json` is stored next to the config.
+Konfigurace se hledá v tomhle pořadí: `$CLAUDEMAIL_CONFIG` → `config.json` vedle
+skriptu → `~\.claudemail\config.json`. Instalace tak nedrží žádné přihlašovací
+údaje vedle spustitelného souboru, zatímco checkout může mít pro vývoj vlastní
+`config.json`. `.state.json` se ukládá vedle konfigurace.
 
-### Installation
+### Instalace
 
 ```powershell
 npm install
@@ -40,71 +40,71 @@ Copy-Item ClaudeMail.js, package.json ~\.local\ClaudeMail\
 Copy-Item -Recurse -Force node_modules ~\.local\ClaudeMail\node_modules
 Copy-Item ClaudeMail.cmd ~\.local\bin\
 New-Item -ItemType Directory -Force ~\.claudemail
-Copy-Item config.example.json ~\.claudemail\config.json   # then fill in accounts
+Copy-Item config.example.json ~\.claudemail\config.json   # pak doplnit účty
 ```
 
-The tool can then be called from anywhere as `ClaudeMail.cmd --since 1d`.
+Nástroj pak jde odkudkoli zavolat jako `ClaudeMail.cmd --since 1d`.
 
-On Linux or macOS there is no `.cmd` wrapper — run `node ClaudeMail.js` directly,
-or add a small shell script of your own. Everything else works the same.
+Na Linuxu a macOS žádná `.cmd` obálka není — spouštějte přímo
+`node ClaudeMail.js`, nebo si přidejte vlastní malý shellový skript. Všechno
+ostatní funguje stejně.
 
-`config.json` and `.state.json` are in `.gitignore`.
+`config.json` a `.state.json` jsou v `.gitignore`.
 
-### Configuration
+### Konfigurace
 
-`name` is an arbitrary label for a mailbox (`personal`, `work`, `billing`). It
-is used by `--account`, appears in `ref=`, and is the checkpoint key for
-`--since-last`. It must be unique and must not contain a colon (that separates
-the parts of a `ref`).
+`name` je libovolný štítek schránky (`osobni`, `prace`, `fakturace`). Používá ho
+`--account`, objevuje se v `ref=` a je klíčem checkpointu pro `--since-last`.
+Musí být jedinečný a nesmí obsahovat dvojtečku (ta odděluje části `ref`).
 
-A password can be given directly (`"pass"`) or through an environment variable
+Heslo lze zadat přímo (`"pass"`), nebo přes proměnnou prostředí
 (`"passEnv": "WORK_MAIL_PASS"`).
 
-### App passwords (Gmail)
+### Hesla aplikací (Gmail)
 
-Your main Google account password **will not work** over IMAP, even when it is
-correct. You need a 16-character app password:
+Hlavní heslo k účtu Google přes IMAP **fungovat nebude**, ani když je správné.
+Potřebujete 16znakové heslo aplikace:
 
-1. Enable **two-factor authentication** (Google Account → Security). Without it
-   the app-password section is not shown at all — and Google does not explain why.
-2. Open <https://myaccount.google.com/apppasswords>
-3. Enter a name (e.g. `ClaudeMail`) → *Create*.
-4. Copy the 16 characters. **They are shown only once.**
-5. Put them into `config.json` as `"pass"`, without spaces.
+1. Zapnout **dvoufaktorové ověření** (Účet Google → Zabezpečení). Bez něj se
+   sekce s hesly aplikací vůbec nezobrazí — a Google nevysvětlí proč.
+2. Otevřít <https://myaccount.google.com/apppasswords>
+3. Zadat název (např. `ClaudeMail`) → *Vytvořit*.
+4. Zkopírovat 16 znaků. **Ukážou se jen jednou.**
+5. Vložit je do `config.json` jako `"pass"`, bez mezer.
 
-Google Workspace administrators can disable app passwords, in which case the
-page is unavailable. Most other providers offer an equivalent feature.
+Správci Google Workspace můžou hesla aplikací zakázat, pak je stránka
+nedostupná. Většina ostatních poskytovatelů nabízí obdobnou funkci.
 
-If the password is ever compromised, revoke it on the same page — it applies to
-this one application only, and the rest of the account is unaffected.
+Pokud se heslo někdy prozradí, zneplatněte ho na téže stránce — platí jen pro
+tuhle jednu aplikaci a zbytku účtu se to nedotkne.
 
-Check that it connects:
-
-```bash
-node ClaudeMail.js --accounts     # what is configured
-node ClaudeMail.js --since 1h     # a trial listing
-```
-
-## Usage
+Ověření, že se to připojí:
 
 ```bash
-node ClaudeMail.js --since 1d --threads       # grouped into conversations
-node ClaudeMail.js --since 61d --from bank    # searched on the server
-node ClaudeMail.js --since 1w --text invoice
-node ClaudeMail.js --since 1d --limit 50 --offset 50   # next page
-node ClaudeMail.js --since 6h                 # last 6 hours (m/h/d/w)
-node ClaudeMail.js --date 2026-07-20          # one specific day
-node ClaudeMail.js --since 2026-07-15 --until 2026-07-20   # a date range
-node ClaudeMail.js --since-last               # since the last successful check
-node ClaudeMail.js --since 1d --unread        # unread only
-node ClaudeMail.js --subject invoice          # subject filter
-node ClaudeMail.js --account work             # a single account
-node ClaudeMail.js --since 1w --no-snippet    # fast, headers only
-node ClaudeMail.js --body gmail:INBOX:12345   # full text of one message
-node ClaudeMail.js --headers gmail:INBOX:12345  # who sent it, and how to leave
+node ClaudeMail.js --accounts     # co je nakonfigurováno
+node ClaudeMail.js --since 1h     # zkušební výpis
 ```
 
-Output:
+## Použití
+
+```bash
+node ClaudeMail.js --since 1d --threads       # seskupeno do konverzací
+node ClaudeMail.js --since 61d --from bank    # hledáno na serveru
+node ClaudeMail.js --since 1w --text faktura
+node ClaudeMail.js --since 1d --limit 50 --offset 50   # další stránka
+node ClaudeMail.js --since 6h                 # posledních 6 hodin (m/h/d/w)
+node ClaudeMail.js --date 2026-07-20          # jeden konkrétní den
+node ClaudeMail.js --since 2026-07-15 --until 2026-07-20   # rozsah dat
+node ClaudeMail.js --since-last               # od poslední úspěšné kontroly
+node ClaudeMail.js --since 1d --unread        # jen nepřečtené
+node ClaudeMail.js --subject faktura          # filtr na předmět
+node ClaudeMail.js --account prace            # jediný účet
+node ClaudeMail.js --since 1w --no-snippet    # rychle, jen hlavičky
+node ClaudeMail.js --body gmail:INBOX:12345   # plné znění jedné zprávy
+node ClaudeMail.js --headers gmail:INBOX:12345  # kdo to poslal a jak se odhlásit
+```
+
+Výstup:
 
 ```
 # 2 message(s) - last 6h
@@ -116,362 +116,355 @@ Output:
   ref=work:INBOX:8412
 ```
 
-`ref=` identifies a message for `--body`, `--save`, `--delete` and `--move`, in
-the form `account:folder:uid`.
+`ref=` identifikuje zprávu pro `--body`, `--save`, `--delete` a `--move`, ve
+tvaru `účet:složka:uid`.
 
-### Spam and bulk mail
+### Spam a hromadná pošta
 
-The tool has no spam filter of its own — it reports the verdict the mail
-infrastructure already reached, as a tag:
+Nástroj nemá vlastní spamový filtr — jen přetlumočí verdikt, ke kterému už došla
+poštovní infrastruktura, jako značku:
 
-| Tag | Source |
+| Značka | Zdroj |
 |---|---|
-| `spam` | `X-Spam-Flag` / `X-Spam-Status` / `X-Spam-Level`, or sitting in the Junk folder |
-| `auth-fail` | `Authentication-Results`: DMARC failed, or both SPF and DKIM |
-| `bulk` | `List-Unsubscribe`, `List-Id` or `Precedence: bulk` |
+| `spam` | `X-Spam-Flag` / `X-Spam-Status` / `X-Spam-Level`, nebo umístění ve složce Junk |
+| `auth-fail` | `Authentication-Results`: selhal DMARC, nebo SPF i DKIM zároveň |
+| `bulk` | `List-Unsubscribe`, `List-Id` nebo `Precedence: bulk` |
 | `auto` | `Auto-Submitted` |
 
 ```bash
-node ClaudeMail.js --since 1d --no-bulk     # without newsletters and automated mail
-node ClaudeMail.js --since 1d --only-bulk   # only those
-node ClaudeMail.js --spam --since 7d        # what landed in spam
+node ClaudeMail.js --since 1d --no-bulk     # bez newsletterů a automatické pošty
+node ClaudeMail.js --since 1d --only-bulk   # jen ty
+node ClaudeMail.js --spam --since 7d        # co spadlo do spamu
 ```
 
-Gmail does **not** put its spam verdict in the headers — it is only visible from
-the folder the message sits in, which is where the `spam` tag comes from there.
+Gmail svůj spamový verdikt do hlaviček **nepíše** — je vidět jen z toho, ve které
+složce zpráva leží, a odtud tam značka `spam` pochází.
 
-Note that `bulk` does not mean "uninteresting": notifications from GitLab or CI
-carry `List-Id`, so `--no-bulk` hides them too.
+Pozor, `bulk` neznamená „nezajímavé“: oznámení z GitLabu nebo CI nesou `List-Id`,
+takže je `--no-bulk` schová taky.
 
-`--folder` accepts the portable aliases `@junk`, `@trash`, `@archive`, `@sent`
-and `@all`, resolved through IMAP SPECIAL-USE — no need to know whether the
-server calls it `[Gmail]/Spam` or `INBOX.Junk`.
+`--folder` bere přenositelné aliasy `@junk`, `@trash`, `@archive`, `@sent`
+a `@all`, překládané přes IMAP SPECIAL-USE — netřeba vědět, jestli tomu server
+říká `[Gmail]/Spam` nebo `INBOX.Junk`.
 
-### Attachments
+### Přílohy
 
 ```bash
-node ClaudeMail.js --attachments work:INBOX:8412            # list only, downloads nothing
-node ClaudeMail.js --save work:INBOX:8412                   # all attachments
-node ClaudeMail.js --save work:INBOX:8412 --part 1          # just number 1
-node ClaudeMail.js --save work:INBOX:8412 --out D:\invoices # different target
-node ClaudeMail.js --save work:INBOX:8412 --max-size 100    # allow large ones
+node ClaudeMail.js --attachments work:INBOX:8412            # jen výpis, nic nestahuje
+node ClaudeMail.js --save work:INBOX:8412                   # všechny přílohy
+node ClaudeMail.js --save work:INBOX:8412 --part 1          # jen číslo 1
+node ClaudeMail.js --save work:INBOX:8412 --out D:\faktury  # jiný cíl
+node ClaudeMail.js --save work:INBOX:8412 --max-size 100    # povolit velké
 ```
 
-The default target is `%USERPROFILE%\Downloads\ClaudeMail`. Files are never
-overwritten (a collision gets a `-1`, `-2` suffix), and attachments over 25 MB
-are skipped.
+Výchozí cíl je `%USERPROFILE%\Downloads\ClaudeMail`. Soubory se nikdy nepřepisují
+(při kolizi dostanou příponu `-1`, `-2`) a přílohy nad 25 MB se přeskakují.
 
-Attachment names are untrusted input, so they are sanitized: paths and traversal
-(`../`) are stripped, as are characters Windows cannot store and reserved device
-names (`CON`, `NUL`, …). Executable formats produce a warning.
+Názvy příloh jsou nedůvěryhodný vstup, takže se sanitizují: cesty a traversal
+(`../`) se odstraňují, stejně jako znaky, které Windows neumí uložit, a
+rezervovaná jména zařízení (`CON`, `NUL`, …). Spustitelné formáty vyvolají
+varování.
 
-### Deleting
+### Mazání
 
 ```bash
-node ClaudeMail.js --delete work:INBOX:8412 --yes          # to Trash (reversible)
-node ClaudeMail.js --delete a:INBOX:1,a:INBOX:2 --yes      # several at once
-node ClaudeMail.js --delete work:INBOX:8412 --yes --purge  # PERMANENT
+node ClaudeMail.js --delete work:INBOX:8412 --yes          # do koše (vratné)
+node ClaudeMail.js --delete a:INBOX:1,a:INBOX:2 --yes      # několik naráz
+node ClaudeMail.js --delete work:INBOX:8412 --yes --purge  # TRVALE
 ```
 
-`--yes` is mandatory so that a typo in some other command can never delete mail.
-Without `--purge` this is a move to Trash; the folder is found through IMAP
-SPECIAL-USE, or can be named explicitly with `--trash-folder`.
+`--yes` je povinné, aby překlep v nějakém jiném příkazu nikdy nemohl smazat
+poštu. Bez `--purge` jde o přesun do koše; složka se najde přes IMAP SPECIAL-USE,
+nebo ji lze pojmenovat výslovně přes `--trash-folder`.
 
-Every message is identified before it is touched, and the line leads with the
-`ref` it came from:
+Každá zpráva se před dotykem identifikuje a řádek začíná `ref`, ze kterého
+vzešla:
 
 ```
 moved to [Gmail]/Trash: work:INBOX:8412 | 2026-07-15 16:05 | Shop <news@shop.example> | Weekly offers
 ```
 
-The `ref` is there so the output can be reconciled with the list that was asked
-for — date, sender and subject alone cannot be matched back to an input, which is
-exactly what a run interrupted halfway leaves behind. It names the source: a move
-issues a new UID, so that `ref` stops resolving the moment the move succeeds.
+`ref` je tam proto, aby šel výstup spárovat se seznamem, na který se ptalo —
+datum, odesílatel a předmět samy o sobě zpátky ke vstupu přiřadit nejdou, a přesně
+to po sobě nechá běh přerušený v půlce. Pojmenovává zdroj: přesun vydá nové UID,
+takže ten `ref` přestane platit v okamžiku, kdy přesun uspěje.
 
-### Moving
+### Přesouvání
 
-Deleting is a move to Trash, and `--move` is the same operation with the
-destination spelled out - which is how a message comes back out of Trash:
+Mazání je přesun do koše a `--move` je tatáž operace s vypsaným cílem — a přesně
+tak se zpráva dostane z koše zase ven:
 
 ```bash
-node ClaudeMail.js --move work:Trash:8412 --move-to INBOX --yes     # undo a delete
-node ClaudeMail.js --move a:Trash:1,a:Trash:2 --move-to INBOX --yes # several at once
-node ClaudeMail.js --move work:INBOX:8412 --move-to @archive --yes  # file it away
+node ClaudeMail.js --move work:Trash:8412 --move-to INBOX --yes     # vrátit smazání
+node ClaudeMail.js --move a:Trash:1,a:Trash:2 --move-to INBOX --yes # několik naráz
+node ClaudeMail.js --move work:INBOX:8412 --move-to @archive --yes  # založit
 ```
 
-`--move-to` takes a real folder name or any of the `@junk`/`@trash`/`@archive`/
-`@sent`/`@all` aliases, and the folder has to exist - the run stops before
-touching anything if it does not, because a MOVE into a missing mailbox fails
-with a bare `[TRYCREATE]` that never names what was wrong. `--yes` is mandatory
-here too, and `--move` cannot be combined with `--delete` or `--purge`.
+`--move-to` bere skutečný název složky nebo kterýkoli z aliasů `@junk`/`@trash`/
+`@archive`/`@sent`/`@all` a složka musí existovat — běh se zastaví dřív, než se
+čehokoli dotkne, protože MOVE do neexistující schránky selže holým
+`[TRYCREATE]`, které nepojmenuje, co bylo špatně. `--yes` je povinné i tady
+a `--move` nejde kombinovat s `--delete` ani `--purge`.
 
-The UID changes: IMAP MOVE re-creates the message in the destination, so the
-`ref=` from the listing is spent once the move succeeds. Flags and the internal
-date survive, so a restored message reappears at its original position in a
-listing sorted by date, not at the top.
+UID se mění: IMAP MOVE zprávu v cíli vytvoří znovu, takže `ref=` z výpisu je po
+úspěšném přesunu vyčerpaný. Příznaky a interní datum zůstávají, takže se obnovená
+zpráva objeví na svém původním místě ve výpisu řazeném podle data, ne nahoře.
 
-### Grouping, search, paging
+### Seskupování, hledání, stránkování
 
-`--group-by` chooses the axis, loudest group first:
+`--group-by` volí osu, nejhlasitější skupina první:
 
 ```bash
-node ClaudeMail.js --group-by thread --since 1d   # conversations (= --threads)
-node ClaudeMail.js --group-by sender --since 30d  # one group per address
-node ClaudeMail.js --group-by domain --since 30d  # one group per domain
+node ClaudeMail.js --group-by thread --since 1d   # konverzace (= --threads)
+node ClaudeMail.js --group-by sender --since 30d  # jedna skupina na adresu
+node ClaudeMail.js --group-by domain --since 30d  # jedna skupina na doménu
 ```
 
-`thread` groups using `Message-ID`, `References` and `In-Reply-To` only
-(union-find over those identifiers). Subject is deliberately **not** used as a
-fallback key — it would merge unrelated mail that happens to share a subject
-like "Invoice". Each block shows the time span, message count, participants and
-a preview of the newest messages; `refs=` lists every message in the thread.
+`thread` seskupuje jen podle `Message-ID`, `References` a `In-Reply-To`
+(union-find nad těmito identifikátory). Předmět se jako záložní klíč záměrně
+**nepoužívá** — sléval by nesouvisející poštu, která náhodou sdílí předmět jako
+„Faktura“. Každý blok ukazuje časový rozsah, počet zpráv, účastníky a náhled
+nejnovějších zpráv; `refs=` vypisuje každou zprávu ve vlákně.
 
-`sender` and `domain` are a census: who fills this mailbox, and how much. They
-key on the **address**, never the display name — one mailbox varies its name
-between sendings, and splitting those apart understates its volume. `domain`
-exists because the address alone still splits senders that should count as one:
-a brand mails from `news.example.com` and `my.example.com`, and some senders
-randomise the local part per message, which makes every single message its own
-group. Both list the sending addresses under `via`, since that is what `--from`
-and `--exclude-from` need.
+`sender` a `domain` jsou sčítání lidu: kdo tuhle schránku plní a jak moc. Klíčují
+podle **adresy**, nikdy podle zobrazovaného jména — jedna schránka mění jméno
+mezi rozesílkami a jejich rozdělení by její objem podhodnotilo. `domain` existuje
+proto, že i samotná adresa pořád rozděluje odesílatele, kteří by měli počítat za
+jednoho: značka posílá z `news.example.com` i `my.example.com` a někteří
+odesílatelé náhodně mění lokální část u každé zprávy, čímž se z každé jednotlivé
+zprávy stane vlastní skupina. Obojí vypisuje odesílající adresy pod `via`,
+protože to je přesně to, co potřebuje `--from` a `--exclude-from`.
 
-Neither census downloads bodies — the mode answers "who and how much", and
-paying for hundreds of bodies to print one subject line each would be the
-slowest possible way to do it. `--links` is therefore rejected in those modes.
-The text output lists ten messages per group and summarises the rest; `--json`
-is uncapped and carries every `ref`.
+Ani jedno sčítání nestahuje těla — režim odpovídá na „kdo a kolik“ a platit za
+stovky těl, aby se z každého vytiskl jeden řádek předmětu, by byl ten nejpomalejší
+možný způsob. `--links` se proto v těchhle režimech odmítá. Textový výstup vypíše
+deset zpráv na skupinu a zbytek shrne; `--json` je bez stropu a nese každý `ref`.
 
-`--from`, `--subject` and `--text` are translated into IMAP
-`SEARCH FROM/SUBJECT/BODY` and run on the server. The difference is an order of
-magnitude: searching two months of mail (2314 messages) takes seconds instead of
-downloading every header first.
+`--from`, `--subject` a `--text` se překládají do IMAP
+`SEARCH FROM/SUBJECT/BODY` a běží na serveru. Rozdíl je řádový: prohledání dvou
+měsíců pošty (2314 zpráv) trvá vteřiny místo stahování všech hlaviček předem.
 
-All three are repeatable, and a repeat widens its own flag into an `OR` — one run
-can cover a whole list of senders instead of one call per sender:
+Všechny tři jde opakovat a opakování rozšíří vlastní přepínač na `OR` — jeden běh
+tak pokryje celý seznam odesílatelů místo jednoho volání na odesílatele:
 
 ```bash
-# everything from any of these three, as one census
+# všechno od kteréhokoli z těch tří, jako jedno sčítání
 node ClaudeMail.js --since 30d --from temu --from booking --from quora --group-by domain
 ```
 
-Separate flags keep narrowing each other, so `--from a --from b --subject c` is
-`(a OR b) AND c`. IMAP allows one `OR` per nesting level, so two widened flags
-cannot each become their own: they compile to a single `OR` over the
-combinations, every operand carrying one needle from each flag. That product is
-what goes on the wire, so beyond 128 combinations the run is refused with the
-count — a command line too long to send would otherwise fail as a protocol error
-that names no flag.
+Různé přepínače se navzájem dál zužují, takže `--from a --from b --subject c` je
+`(a OR b) AND c`. IMAP dovolí jeden `OR` na úroveň zanoření, takže dva rozšířené
+přepínače nemůžou mít každý ten svůj: kompilují se do jediného `OR` nad
+kombinacemi, kde každý operand nese jednu jehlu z každého přepínače. Na drát jde
+právě tenhle součin, takže nad 128 kombinací se běh odmítne i s počtem — příliš
+dlouhý příkazový řádek by jinak selhal jako protokolová chyba, která nepojmenuje
+žádný přepínač.
 
-`--exclude-from` and `--exclude-subject` (both repeatable) are the same idea
-inverted, compiled to `NOT` and likewise run on the server:
+`--exclude-from` a `--exclude-subject` (obojí opakovatelné) jsou tatáž myšlenka
+obráceně, kompilují se do `NOT` a rovněž běží na serveru:
 
 ```bash
-# "newsletters, but not the notification systems"
+# „newslettery, ale ne oznamovací systémy“
 node ClaudeMail.js --since 30d --only-bulk --group-by domain --exclude-from gitlab
 ```
 
-Several exclusions become `NOT (a OR b OR …)`, which drops every one of them.
-Running server-side matters beyond speed: mail that never arrives is also never
-counted, so "of 213 matches" keeps meaning what it says. The needles are
-literal — unlike a `ref=` list, they are never split on commas, because that
-would quietly change what a filter matches.
+Několik vyloučení se stane `NOT (a OR b OR …)`, což zahodí každé z nich. Běh na
+serveru je důležitý i mimo rychlost: pošta, která nikdy nedorazí, se ani nepočítá,
+takže „ze 213 shod“ dál znamená, co říká. Jehly jsou doslovné — na rozdíl od
+seznamu `ref=` se nikdy nedělí podle čárek, protože to by tiše měnilo, co filtr
+matchuje.
 
-**Prefer `--all` over paging.** Paging is stateless — every page re-runs the
-whole search — and the cost of a run is dominated by fixed overhead, not by the
-messages:
+**Dávejte přednost `--all` před stránkováním.** Stránkování je bezstavové —
+každá stránka spouští celé hledání znovu — a cenu běhu určuje pevná režie, ne
+zprávy:
 
-| | measured |
+| | naměřeno |
 |---|---|
-| `--accounts` (config only, no IMAP) | 741 ms |
-| one-hour window, few messages | 1066 ms |
-| 99 messages in one call | 1195 ms |
-| ~1100 messages in one call | 2221 ms |
-| the same 99 messages in 5 pages of 20 | **5736 ms** |
+| `--accounts` (jen konfigurace, bez IMAP) | 741 ms |
+| hodinové okno, pár zpráv | 1066 ms |
+| 99 zpráv v jednom volání | 1195 ms |
+| ~1100 zpráv v jednom volání | 2221 ms |
+| týchž 99 zpráv v 5 stránkách po 20 | **5736 ms** |
 
-So a run costs ~740 ms of Node startup plus ~325 ms of connect/login/SEARCH,
-against roughly **1 ms per message**. N pages pay that setup N times: a month of
-mail taken whole is 2.2 s, the same month paged by fifties is 22 calls and ~24 s.
-`--all` removes the cap on both `--limit` and `--max-scan` so one call can take
-everything without having to guess a big number — and it refuses to combine with
-either flag rather than silently overriding a cap that was asked for.
+Běh tedy stojí ~740 ms startu Node plus ~325 ms connect/login/SEARCH, proti
+zhruba **1 ms na zprávu**. N stránek zaplatí tuhle přípravu N-krát: měsíc pošty
+vzatý vcelku je 2,2 s, týž měsíc po padesátce je 22 volání a ~24 s. `--all`
+odstraňuje strop u `--limit` i `--max-scan`, takže jedno volání může vzít
+všechno, aniž by se muselo hádat velké číslo — a odmítá se s kterýmkoli z těch
+přepínačů kombinovat, místo aby tiše přebilo strop, o který si někdo řekl.
 
-`--offset` pages when you do want it. Without `--group-by`, the newest
-`offset+limit` messages are taken from each folder, which is sufficient for
-global paging even in the worst case where an entire page comes from a single
-folder. Pages are independent queries, not a snapshot: mail arriving between two
-pages shifts everything down, so the last message of one page can reappear on
-the next. Use a closed window (`--since X --until Y`) or `--all` for a stable
-enumeration.
+`--offset` stránkuje, když to opravdu chcete. Bez `--group-by` se z každé složky
+bere `offset+limit` nejnovějších zpráv, což na globální stránkování stačí i
+v nejhorším případě, kdy celá stránka pochází z jediné složky. Stránky jsou
+nezávislé dotazy, ne snímek: pošta, která přijde mezi dvěma stránkami, všechno
+posune dolů, takže poslední zpráva jedné stránky se může objevit na další. Pro
+stabilní výčet použijte uzavřené okno (`--since X --until Y`) nebo `--all`.
 
-With `--group-by`, **grouping happens before paging** and pages consist of whole
-groups, so a conversation — or a sender's mail — is never split across pages;
-otherwise it would appear to hold fewer messages than it really does. A group
-can reach anywhere into the window, so pre-trimming is impossible in that mode;
-`--max-scan` (default 1000) bounds the scan instead and warns when groups may be
-incomplete.
+S `--group-by` se **seskupuje před stránkováním** a stránky se skládají z celých
+skupin, takže konverzace — nebo pošta jednoho odesílatele — se nikdy nerozdělí
+mezi stránky; jinak by vypadala, že obsahuje míň zpráv, než ve skutečnosti má.
+Skupina může sahat kamkoli do okna, takže v tomhle režimu není předběžné oříznutí
+možné; sken místo toho ohraničuje `--max-scan` (výchozí 1000), který varuje, když
+můžou být skupiny neúplné.
 
-The reported count ("of 213") is the real number of matches, not the number of
-messages downloaded. `--json` reports both numbers separately, because one of
-them capped by `--limit` looks exactly as plausible as the other:
+Uváděný počet („of 213“) je skutečný počet shod, ne počet stažených zpráv.
+`--json` hlásí obě čísla zvlášť, protože jedno z nich oříznuté `--limit`em vypadá
+přesně tak věrohodně jako to druhé:
 
-| Field | Meaning |
+| Pole | Význam |
 |---|---|
-| `count` | messages in this payload — `--limit` caps it |
-| `matched` | messages the search found, before `offset`/`limit` |
-| `groupCount` | groups the search found, when `--group-by` is on |
-| `offset`, `limit` | the paging that produced this payload |
+| `count` | zprávy v této dávce — `--limit` je omezuje |
+| `matched` | zprávy, které hledání našlo, před `offset`/`limit` |
+| `groupCount` | skupiny, které hledání našlo, když je zapnuté `--group-by` |
+| `offset`, `limit` | stránkování, které tuhle dávku vytvořilo |
 
-Each thread block previews its **two newest** messages, not just the newest one.
-Systems like GitLab send a status notification ("Reassigned issue", "Issue was
-closed") on top of the message that caused it, so the last message in a thread
-is regularly the one that says least — an eleven-message discussion summarized
-as `Reassigned Issue 550`. Two previews keep the content visible whichever order
-they arrived in.
+Každý blok vlákna ukazuje náhled **dvou nejnovějších** zpráv, ne jen té
+nejnovější. Systémy jako GitLab posílají stavové oznámení („Reassigned issue“,
+„Issue was closed“) navrch zprávy, která ho způsobila, takže poslední zpráva ve
+vlákně je pravidelně ta, která říká nejmíň — jedenáctizprávová diskuse shrnutá
+jako `Reassigned Issue 550`. Dva náhledy udrží obsah viditelný bez ohledu na
+pořadí, ve kterém dorazily.
 
-Body previews are downloaded only after the global sort and trim, and only for
-messages that will actually be printed.
+Náhledy těl se stahují až po globálním seřazení a oříznutí, a jen pro zprávy,
+které se skutečně vytisknou.
 
-### Links
+### Odkazy
 
-`--links` prints full URLs from the body — snippets shorten them to a bare
-domain, which makes them impossible to open. Unsubscribe, tracking, asset and
-footer links are omitted.
+`--links` vypisuje z těla plné URL — náhledy je zkracují na holou doménu, což je
+činí neotevřitelnými. Odhlašovací, sledovací, asset a patičkové odkazy se
+vynechávají.
 
-`--links all` turns that filtering off. Those omitted links are exactly what
-someone asking *"how do I get off this list"* is after.
+`--links all` tohle filtrování vypne. Ty vynechané odkazy jsou přesně to, co
+hledá někdo, kdo se ptá *„jak se z toho seznamu dostanu ven“*.
 
-URLs are read from the **markup as well as the text**. Two habits of real
-newsletters would otherwise hide every link in them: the text conversion drops
-`href` targets on purpose (inline URLs bury the words, leaving "unsubscribe
-here" with no *here*), and the sender's `text/plain` alternative is routinely
-stripped of URLs altogether. Reading only the part the preview came from
-reported that a mail full of links contained none.
+URL se čtou **z markupu i z textu**. Dva zvyky skutečných newsletterů by jinak
+každý odkaz v nich schovaly: textová konverze cíle `href` záměrně zahazuje
+(vložené URL pohřbí slova a nechají „unsubscribe here“ bez toho *here*)
+a odesílatelova `text/plain` alternativa bývá rutinně URL úplně zbavená. Čtení
+jen té části, ze které vzešel náhled, hlásilo, že mail plný odkazů žádné
+neobsahuje.
 
-A digest shortens long lists and says by how much; `--body <ref> --links all`
-prints every one. When nothing is found the output says so, rather than
-printing nothing at all — an empty result and a body that failed to download
-used to look identical.
+Výtah dlouhé seznamy zkrátí a řekne o kolik; `--body <ref> --links all` vypíše
+každý. Když se nic nenajde, výstup to řekne, místo aby nevytiskl vůbec nic —
+prázdný výsledek a tělo, které se nepodařilo stáhnout, dřív vypadaly stejně.
 
-### Headers and unsubscribing
+### Hlavičky a odhlašování
 
 ```bash
-node ClaudeMail.js --headers gmail:INBOX:12345               # the notable ones
-node ClaudeMail.js --headers gmail:INBOX:12345 --all-headers # everything
-node ClaudeMail.js --unsubscribe gmail:INBOX:12345           # show the options
-node ClaudeMail.js --unsubscribe gmail:INBOX:12345 --yes     # actually leave
-node ClaudeMail.js --unsubscribe a:INBOX:1,a:INBOX:2         # a list, like --delete
+node ClaudeMail.js --headers gmail:INBOX:12345               # ty pozoruhodné
+node ClaudeMail.js --headers gmail:INBOX:12345 --all-headers # všechny
+node ClaudeMail.js --unsubscribe gmail:INBOX:12345           # ukázat možnosti
+node ClaudeMail.js --unsubscribe gmail:INBOX:12345 --yes     # opravdu odejít
+node ClaudeMail.js --unsubscribe a:INBOX:1,a:INBOX:2         # seznam, jako --delete
 ```
 
-`--headers` prints the fields that answer a question someone actually asks —
-sender, `Reply-To`, `Return-Path`, threading, every `List-*`, and the
-spam/authentication verdicts — with RFC 2047 encoded words decoded. Delivery
-plumbing (`Received` chains, DKIM signatures) needs `--all-headers`.
+`--headers` vypíše pole, která odpovídají na otázku, jakou si někdo skutečně
+klade — odesílatel, `Reply-To`, `Return-Path`, vláknování, každé `List-*`
+a spamové/autentizační verdikty — s dekódovanými RFC 2047 encoded words.
+Doručovací instalatérství (řetězce `Received`, podpisy DKIM) vyžaduje
+`--all-headers`.
 
-`--unsubscribe` reads `List-Unsubscribe` and prints what the sender offers.
-On its own it sends nothing. With `--yes` it performs the
-[RFC 8058](https://www.rfc-editor.org/rfc/rfc8058) one-click POST, and only
-that:
+`--unsubscribe` čte `List-Unsubscribe` a vypíše, co odesílatel nabízí. Samo
+o sobě nic neodesílá. S `--yes` provede one-click POST podle
+[RFC 8058](https://www.rfc-editor.org/rfc/rfc8058), a jen ten:
 
-- a sender without `List-Unsubscribe-Post: List-Unsubscribe=One-Click` is
-  refused, because requesting such a URL promises nothing — it may only record
-  the click;
-- `mailto:` options are printed, never used — there is no SMTP here;
-- a message tagged `spam` or `auth-fail` is refused outright. Unsubscribing
-  confirms that the address is live and read, which is worth more to that kind
-  of sender than the mail costs the recipient.
+- odesílatel bez `List-Unsubscribe-Post: List-Unsubscribe=One-Click` se odmítne,
+  protože vyžádání takové URL nic neslibuje — může jen zaznamenat kliknutí;
+- možnosti `mailto:` se vypíší, nikdy nepoužijí — SMTP tu není;
+- zpráva označená `spam` nebo `auth-fail` se odmítne rovnou. Odhlášení potvrzuje,
+  že adresa žije a někdo ji čte, což má pro takového odesílatele větší cenu, než
+  ho ta pošta stojí příjemce.
 
-Senders that publish no `List-Unsubscribe` at all used to end the matter. Now the
-body is searched for the footer opt-out instead — by URL shape, by anchor text
-where the URL is an opaque token ("unsubscribe here"), and by the words next to a
-URL in the plain-text alternative. The candidates are printed for a human to open
-and are **never submitted, not even with `--yes`**: only the RFC 8058 header
-promises that a request unsubscribes anything, while a footer link commonly wants
-a session or a confirmation click. Reading the body costs a download, so it
-happens only for the messages whose headers offered nothing.
+Odesílatelé, kteří nezveřejňují žádné `List-Unsubscribe`, tím dřív věc uzavřeli.
+Teď se místo toho prohledá tělo na patičkový opt-out — podle tvaru URL, podle
+textu odkazu tam, kde je URL neprůhledný token („unsubscribe here“), a podle slov
+vedle URL v prostotextové alternativě. Kandidáti se vypíšou, aby je otevřel
+člověk, a **nikdy se neodesílají, ani s `--yes`**: jen hlavička podle RFC 8058
+slibuje, že požadavek něco odhlásí, zatímco patičkový odkaz běžně chce relaci
+nebo potvrzovací kliknutí. Čtení těla stojí stažení, takže se děje jen u zpráv,
+jejichž hlavičky nenabídly nic.
 
-`--unsubscribe` takes a list (comma-separated, or repeat the flag) and shares
-one connection per account, so a batch of twenty is one login rather than
-twenty. Batching changes nothing else: **every refusal above is re-evaluated per
-message**, because a batch must not become a way to push through what would be
-declined one at a time. A run over more than one ref ends with a tally
-(`# 13 ref(s): 12 unsubscribed, 1 rejected by the sender`), and without `--yes`
-that tally is the triage — how many support one-click, how many need a browser,
-how many offer nothing.
+`--unsubscribe` bere seznam (oddělený čárkami, nebo přepínač zopakovat) a sdílí
+jedno spojení na účet, takže dávka dvaceti je jedno přihlášení místo dvaceti. Nic
+jiného dávkování nemění: **každé z výše uvedených odmítnutí se vyhodnocuje znovu
+pro každou zprávu**, protože z dávky se nesmí stát způsob, jak protlačit to, co
+by se po jednom odmítlo. Běh nad více než jedním refem končí sumářem
+(`# 13 ref(s): 12 unsubscribed, 1 rejected by the sender`), a bez `--yes` je ten
+sumář tříděním — kolik jich podporuje one-click, kolik jich potřebuje prohlížeč,
+kolik jich nenabízí nic.
 
-### Time window
+### Časové okno
 
-`--since` takes either a relative spec (`90m`, `6h`, `2d`, `1w`) or an absolute
-`YYYY-MM-DD`. `--until` closes the range from the other end and accepts the same
-two forms, so both `--since 2026-07-15 --until 2026-07-20` and
-`--since 30d --until 7d` work. An end *date* is inclusive of that whole day.
-`--date` remains the shorthand for a single day.
+`--since` bere buď relativní zadání (`90m`, `6h`, `2d`, `1w`), nebo absolutní
+`YYYY-MM-DD`. `--until` uzavírá rozsah z druhé strany a přijímá tytéž dva tvary,
+takže funguje jak `--since 2026-07-15 --until 2026-07-20`, tak
+`--since 30d --until 7d`. Koncové *datum* zahrnuje celý ten den. `--date` zůstává
+zkratkou pro jediný den.
 
-`--since-last` reads a per-account checkpoint from `.state.json` and moves it to
-the start of the run, but only for accounts that were fetched successfully.
+`--since-last` čte checkpoint pro každý účet z `.state.json` a posouvá ho na
+začátek běhu, ale jen u účtů, které se stáhly úspěšně.
 
-**It cannot be paged, and the combination is rejected.** A successful run moves
-the checkpoint, so a second page would search the window the first page just
-consumed — which looks exactly like "nothing new" while the remaining messages
-are no longer reachable that way at all. When more matched than fit, the run says
-so and names the day of the *previous* checkpoint, which is the only window that
-still reaches the rest:
+**Nejde stránkovat a kombinace se odmítá.** Úspěšný běh checkpoint posune, takže
+druhá stránka by prohledávala okno, které první stránka právě spotřebovala — což
+vypadá přesně jako „nic nového“, zatímco zbývající zprávy už tímhle způsobem
+nejsou dosažitelné vůbec. Když se toho našlo víc, než se vešlo, běh to řekne
+a pojmenuje den *předchozího* checkpointu, což je jediné okno, které na zbytek
+ještě dosáhne:
 
 ```
 ! showing 1 of 49 messages - the checkpoint has moved, so the rest is NOT
   reachable with --offset; re-read it with --since 2026-07-29 (or use --all next time)
 ```
 
-Because the checkpoint is per account, two accounts can be at different points.
-The header then names each one rather than describing the whole listing by
-whichever account happened to be fetched first:
+Protože je checkpoint na účet, můžou být dva účty na různých místech. Hlavička
+pak pojmenuje každý zvlášť, místo aby popsala celý výpis podle toho účtu, který
+se náhodou stáhl první:
 
 ```
 # 2 message(s) - gmail: since last check (2026-07-29 03:10) | work: since last check (2026-07-30 02:52)
 ```
 
-The reported `from`/`until` widen to cover every account in that case, so they
-never exclude a message that is in the output.
+Uváděné `from`/`until` se v takovém případě rozšíří tak, aby pokryly každý účet,
+takže nikdy nevyloučí zprávu, která je ve výstupu.
 
-## Implementation notes
+## Poznámky k implementaci
 
-- IMAP `SEARCH SINCE` has day granularity only, so the server query is widened
-  to whole days and the exact time is re-filtered locally against `INTERNALDATE`.
-- Body previews are fetched only for messages that will actually be printed, and
-  only the first few KB of the text part — except under `--links`, where the
-  whole part is needed, since a newsletter's unsubscribe link sits at the very
-  bottom of it.
-- Quoted replies and signatures are stripped from snippets; if that would leave
-  almost nothing, the original text is used instead.
+- IMAP `SEARCH SINCE` má jen denní granularitu, takže se serverový dotaz rozšíří
+  na celé dny a přesný čas se přefiltruje lokálně proti `INTERNALDATE`.
+- Náhledy těl se stahují jen pro zprávy, které se skutečně vytisknou, a jen
+  prvních pár kB textové části — kromě `--links`, kde je potřeba celá část,
+  protože odhlašovací odkaz newsletteru sedí úplně dole.
+- Ze snippetů se odstraňují citované odpovědi a podpisy; kdyby po tom nezbylo
+  skoro nic, použije se původní text.
 
-## Claude Code skill
+## Skill pro Claude Code
 
-`skill/SKILL.md` exposes the tool to natural language ("check my mail from the
-last 6 hours"). Install it by copying:
+`skill/SKILL.md` zpřístupňuje nástroj přirozenému jazyku („zkontroluj mi maily za
+posledních 6 hodin“). Nainstaluje se zkopírováním:
 
 ```powershell
 New-Item -ItemType Directory -Force ~\.claude\skills\mail
 Copy-Item skill\SKILL.md ~\.claude\skills\mail\SKILL.md
 ```
 
-If you run several Claude Code profiles, copy it into each one — skills are not
-shared between profiles.
+Pokud provozujete několik profilů Claude Code, zkopírujte ho do každého — skilly
+se mezi profily nesdílejí.
 
-The skill file is written in Czech, since it is a personal workflow document;
-the tool itself and all its output are in English. It refers to the tool as
-`ClaudeMail.cmd` on `PATH`, so it needs no editing after a move — but adjust it
-if you install elsewhere or are not on Windows.
+Soubor se skillem je psaný česky, protože jde o osobní pracovní dokument; samotný
+nástroj a všechen jeho výstup jsou anglicky. Odkazuje se na nástroj jako
+`ClaudeMail.cmd` na `PATH`, takže po přesunu nepotřebuje úpravu — ale upravte ho,
+pokud instalujete jinam nebo nejste na Windows.
 
-## Tests
+## Testy
 
 ```bash
 npm test
 ```
 
-The suite covers argument parsing, time windows, header classification,
-threading, filename sanitization and text cleanup — everything verifiable
-without a server. The IMAP conversation itself is not covered by tests.
+Sada pokrývá parsování argumentů, časová okna, klasifikaci hlaviček, vláknování,
+sanitizaci názvů souborů a čištění textu — všechno, co jde ověřit bez serveru.
+Samotnou IMAP komunikaci testy nepokrývají.
 
-## License
+## Licence
 
-MIT — see [LICENSE](LICENSE).
+MIT — viz [LICENSE](LICENSE).
