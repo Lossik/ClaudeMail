@@ -49,6 +49,8 @@ Konfigurace s hesly je v `~\.claudemail\config.json`.
 | Uživatel řekne | Parametry |
 |---|---|
 | „shrň mi", „co je nového", „přehled" | přidej **`--threads`** (viz níže) |
+| „ukaž mi newslettery", „kdo mi to zaplavuje" | `--only-bulk --group-by domain` (viz níže) |
+| „tohle nechci vidět" | `--exclude-from <text>` / `--exclude-subject <text>` |
 | „za poslední den" / „dneska" | `--since 1d` |
 | „za posledních 6 hodin" / „hodinu" | `--since 6h` / `--since 1h` |
 | „za týden" / „za měsíc" | `--since 1w` / `--since 30d` |
@@ -70,20 +72,39 @@ Konfigurace s hesly je v `~\.claudemail\config.json`.
 | „vrať to z koše", „přesuň to do archivu" | `--move <ref> --move-to <složka>` (viz níže) |
 | „ukaž další" (po stránkování) | `--offset <n>` |
 
-Další volby: `--limit <n>` (default 50), `--offset <n>`, `--no-snippet`
+Další volby: `--group-by <thread|sender|domain>`, `--limit <n>` (default 50), `--offset <n>`, `--no-snippet`
 (rychlejší, jen hlavičky), `--snippet-len <n>`, `--max-scan <n>`,
-`--accounts` (výpis účtů), `--json` (strojový výstup — pro shrnutí nepotřebný,
+`--accounts` (výpis účtů), `--json` (strojový výstup — `count` je délka payloadu,
+součet je `matched`; pro shrnutí nepotřebný,
 hodí se jen když chceš výsledek dál zpracovávat skriptem).
 
 Bez parametru rozsahu se použije `--since 1d`.
 
-## Vlákna, hledání a stránkování
+## Seskupení, hledání a stránkování
 
-**U přehledů používej `--threads`.** Seskupí zprávy do konverzací podle
-`Message-ID`/`References`, takže dvacet notifikací k jednomu issue je jeden
-blok, ne dvacet řádků. Uvidíš rozsah, počet zpráv, účastníky a poslední
-příspěvek — přesně to, z čeho se shrnuje. Bez `--threads` dostaneš plochý
-seznam; ten se hodí, když uživatel hledá jednu konkrétní zprávu.
+**Osu seskupení vybírej podle toho, na co se uživatel ptá** — je to ta
+nejdůležitější volba celého výpisu:
+
+| Otázka | Osa |
+|---|---|
+| „co je nového", „shrň mi poštu" | `--threads` (= `--group-by thread`) |
+| „ukaž mi newslettery", „kdo mi to zaplavuje", „co můžu vyhodit" | `--group-by domain` |
+| hledám jednu konkrétní zprávu | žádná — plochý seznam |
+
+`--threads` seskupí zprávy do konverzací podle `Message-ID`/`References`, takže
+dvacet notifikací k jednomu issue je jeden blok, ne dvacet řádků.
+
+`--group-by sender`/`domain` je **census**: kdo posílá a kolik, seřazeno od
+nejhlasitějšího. Na hromadnou poštu je to správná osa a `--threads` je tam
+špatná — padesát newsletterů udělá padesát „vláken" o jedné zprávě.
+**Preferuj `domain`:** jedna firma běžně posílá z několika subdomén
+(`news.`, `my.`, `newsletter.`) a některé služby randomizují local part u každé
+zprávy, takže osa `sender` je rozsekne na samostatné grupy. Odesílací adresy se
+vypíšou pod `via`, takže z nich pak složíš `--from`/`--exclude-from`.
+
+Census **nestahuje těla** (proto s ním nejde `--links`). Textový výpis dá deset
+zpráv na grupu a zbytek sečte; `--json` má všechny refy bez omezení — na
+hromadné mazání ber refy odtud.
 
 **Hledej parametry, nikdy stažením všeho.** `--from`, `--subject` a `--text`
 běží na serveru a projedou tisíce zpráv za sekundy. Nikdy nestahuj velké okno
@@ -98,11 +119,27 @@ ClaudeMail.cmd --since 1w --text "splatnost"  # tělo zprávy
 Když neznáš doménu odesílatele, zkus jméno firmy nebo služby — `--from` hledá
 podřetězec v celé hlavičce From, takže zabere i na jméno, nejen na adresu.
 
+**`--exclude-from` a `--exclude-subject` (obojí opakovatelné) vyhazují.** Jdou
+taky na server (jako `NOT`), takže vyloučená pošta se ani nestahuje, ani
+nepočítá — „of 213" tím zůstává pravdivé. Tohle je odpověď na to, že značka
+`bulk` míchá reklamu a notifikační systémy dohromady:
+
+```
+ClaudeMail.cmd --since 30d --only-bulk --group-by domain --exclude-from gitlab
+```
+
+Pozor: **exkluze mizí i ze součtů.** Když z takového výpisu skládáš seznam
+k smazání, řekni uživateli, co jsi vyloučil — jinak schová i něco, co čekal.
+
 **Stránkování:** default `--limit` je 50. Řádek
 `! showing messages 1-50 of 213 - next page: --offset 50` znamená, že jsou
-další; číslo za „of" je skutečný počet shod. S `--threads` se stránkuje
-**po vláknech** a vlákno se nikdy nerozdělí, takže počet zpráv u něj je vždy
-úplný.
+další; číslo za „of" je skutečný počet shod. S `--group-by` se stránkuje
+**po grupách** a grupa se nikdy nerozdělí, takže počet zpráv u ní je vždy úplný.
+
+**V `--json` nikdy nehlas `count` jako počet shod.** Je to délka vráceného pole,
+kterou řeže `--limit` (default 50) — pro součet ber `matched`, u grup
+`groupCount`. Bez toho se dá pohodlně ohlásit „za rok jich je 355", když jich
+je 433, protože se každý dotaz utnul na padesáti.
 
 **Vlákno ukazuje dvě nejnovější zprávy**, ne jednu. GitLab (a podobné systémy)
 posílá ke každé akci ještě stavovou notifikaci („Reassigned Issue 550", „Issue
@@ -151,8 +188,16 @@ odhlašovací hlavičku. Doručovací balast (`Received`, DKIM podpisy) je až p
 odesílateli. Proto stejný postup jako u mazání:
 
 1. Spusť **bez `--yes`** — jen vypíše, co odesílatel nabízí, a nic neodešle.
-2. **Ukaž uživateli, z čeho ho chceš odhlásit** (odesílatel, předmět) a počkej
-   na potvrzení.
+   Bere i seznam (čárkami nebo opakovaně), takže triáž dvaceti newsletterů je
+   jedno spuštění; souhrn na konci řekne, kolik umí one-click, kolik potřebuje
+   prohlížeč a kolik nenabízí nic.
+   ```
+   ClaudeMail.cmd --unsubscribe gmail:INBOX:1,gmail:INBOX:2,gmail:INBOX:3
+   ```
+2. **Vypiš uživateli seznam, z čeho ho chceš odhlásit** (odesílatel, předmět)
+   a počkej na potvrzení. U dávky to platí **tím víc**, ne méně: je to N
+   odchozích požadavků N různým firmám, a jednou odeslané se nevrací. Nikdy
+   neodhlašuj hromadně z jednoho obecného „ukliď mi to".
 3. Teprve pak `--yes`:
    ```
    ClaudeMail.cmd --unsubscribe gmail:INBOX:12345 --yes
@@ -161,6 +206,8 @@ odesílateli. Proto stejný postup jako u mazání:
 - Odhlásí jen odesílatele, kteří podporují **one-click** (RFC 8058). U ostatních
   nástroj odmítne a vypíše URL — to musí uživatel otevřít v prohlížeči sám.
 - `mailto:` variantu neumí (nemá SMTP), jen ji vypíše.
+- Pojistky se v dávce vyhodnocují **u každé zprávy zvlášť** — dávka není
+  způsob, jak protlačit dohromady to, co by jednotlivě neprošlo.
 - Zprávu se značkou `spam` nebo `auth-fail` **odmítne odhlásit i s `--yes`**.
   Odhlášení by takovému odesílateli potvrdilo, že adresa je živá a čtená. Když
   o to uživatel stojí, vysvětli mu to a nabídni místo toho smazání.
@@ -187,7 +234,8 @@ přes všechny dohromady; účet je vidět v `ref=`.
 | Situace | Co udělat |
 |---|---|
 | **Vrátí 0 zpráv** | Není to chyba. Ověř, že rozsah odpovídá zadání, a řekni prostě „nic nepřišlo". Rozsah rozšiřuj jen když o to uživatel stojí — nesnaž se něco najít za každou cenu. |
-| **Zpráv je moc** (stovky) | Nestránkuj naslepo celý výpis. Přidej `--threads`, zúž (`--no-bulk`, `--from`, kratší okno) a řekni uživateli, kolik toho je a jak jsi to omezil. |
+| **Zpráv je moc** (stovky) | Nestránkuj naslepo celý výpis a nesypej si JSON do vlastního filtrování. Přepni osu (`--group-by domain` u hromadné pošty, `--threads` u konverzací), vyhoď šum (`--exclude-from`), zuž okno — a řekni uživateli, kolik toho je a jak jsi to omezil. |
+| **Ve `bulk` je 90 % notifikací** (GitLab, CI, ticketing) | Není to chyba značky — `bulk` znamená „má List-Unsubscribe", ne „reklama". Vyhoď je `--exclude-from gitlab` a seskup `--group-by domain`. |
 | **Řádek začínající `!`** | Chybové/informační hlášení. **Vždy ho uživateli přetlumoč** — hlavně selhání účtu, ať si nemyslí, že mu nic nepřišlo. |
 | **Jeden účet selhal** | Druhý normálně vypiš, ale výslovně řekni, který účet se nepřipojil a že výsledek je proto neúplný. |
 | **Stejná zpráva dvakrát** | Uživatel může mít přeposílání mezi schránkami. Ve shrnutí ji zmiň jednou a poznamenej, že dorazila do obou. |

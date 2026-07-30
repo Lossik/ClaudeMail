@@ -7,8 +7,9 @@ import {
 	cleanBody, htmlToText, truncate, findTextPart, hasAttachment, formatAddress,
 	listAttachments, safeFilename, uniquePath, fmtSize,
 	parseHeaders, headerLines, decodeWords, classify, buildQuery, groupThreads,
+	groupSenders, senderAddress, senderName, senderDomain,
 	collectIds, firstId, extractLinks, extractHrefs, selectLinks, decodeEntities,
-	parseUnsubscribe,
+	parseUnsubscribe, printDigest,
 } from './ClaudeMail.js';
 
 // --- search -----------------------------------------------------------------
@@ -33,6 +34,25 @@ test('buildQuery omits criteria that were not asked for', () => {
 
 	const unread = buildQuery({ from: new Date(2026, 6, 20), until: null }, { unread: true });
 	assert.equal(unread.seen, false);
+});
+
+test('buildQuery turns exclusions into a server-side NOT', () => {
+	const window = { from: new Date(2026, 6, 20), until: null };
+
+	// One exclusion is a plain NOT FROM.
+	assert.deepEqual(buildQuery(window, { excludeFrom: ['gitlab'] }).not, { from: 'gitlab' });
+
+	// Several become NOT (a OR b OR ...), which drops all of them: NOT a AND
+	// NOT b. Nesting them under a single NOT is what makes that hold.
+	assert.deepEqual(
+		buildQuery(window, { excludeFrom: ['gitlab', 'jira'], excludeSubject: ['[CI]'] }).not,
+		{ or: [{ from: 'gitlab' }, { from: 'jira' }, { subject: '[CI]' }] },
+	);
+
+	// Nothing excluded must not leave an empty NOT behind - that would match
+	// everything or nothing depending on the server.
+	assert.equal('not' in buildQuery(window, { excludeFrom: [], excludeSubject: [] }), false);
+	assert.equal('not' in buildQuery(window, {}), false);
 });
 
 // --- threading --------------------------------------------------------------
@@ -108,6 +128,125 @@ test('groupThreads reports unread count, participants and ordering', () => {
 	const conversation = threads[1];
 	assert.equal(conversation.unread, 2);
 	assert.deepEqual(conversation.participants, ['Alice Nováková', 'Bob Dvořák']); // deduplicated, no addresses
+});
+
+// --- sender grouping --------------------------------------------------------
+
+test('senderAddress and senderName split the From header', () => {
+	assert.equal(senderAddress('CK Cesty <info@travel.example>'), 'info@travel.example');
+	assert.equal(senderName('CK Cesty <info@travel.example>'), 'CK Cesty');
+	// Quoted display names are common where the name contains a comma.
+	assert.equal(senderName('"Novák, Jan" <j@n.example>'), 'Novák, Jan');
+	// Case in an address is not meaningful, so it must not split a group.
+	assert.equal(senderAddress('<Info@Travel.EXAMPLE>'), 'info@travel.example');
+	// A bare address has no name to report.
+	assert.equal(senderAddress('info@travel.example'), 'info@travel.example');
+	assert.equal(senderName('info@travel.example'), '');
+});
+
+test('groupSenders keys on the address, not the display name', () => {
+	// One mailbox, three spellings of its name - a single sender all the same.
+	const groups = groupSenders([
+		msg('a:INBOX:9', '2026-07-05T09:00:00Z', { from: 'CK Cesty <info@travel.example>', unread: true }),
+		msg('a:INBOX:8', '2026-07-04T09:00:00Z', { from: 'Cestovní kancelář Cesty <info@travel.example>' }),
+		msg('a:INBOX:7', '2026-07-03T09:00:00Z', { from: 'Cesty <INFO@travel.example>', tags: ['bulk'] }),
+		msg('a:INBOX:2', '2026-07-06T09:00:00Z', { from: 'Nástroje <akce@shop.example>' }),
+	]);
+
+	assert.equal(groups.length, 2);
+
+	// Loudest first, even though the other sender is more recent.
+	const travel = groups[0];
+	assert.equal(travel.key, 'info@travel.example');
+	assert.equal(travel.count, 3);
+	assert.equal(travel.unread, 1);
+	assert.deepEqual(travel.names, ['CK Cesty', 'Cestovní kancelář Cesty', 'Cesty']);
+	assert.deepEqual(travel.tags, ['bulk']); // union across the group
+	// Newest and oldest bound the range printed for the group.
+	assert.equal(travel.latest.ref, 'a:INBOX:9');
+	assert.equal(travel.oldest.ref, 'a:INBOX:7');
+
+	assert.equal(groups[1].key, 'akce@shop.example');
+	assert.equal(groups[1].count, 1);
+});
+
+test('groupSenders breaks a count tie on recency', () => {
+	const groups = groupSenders([
+		msg('a:INBOX:2', '2026-07-06T09:00:00Z', { from: 'b@x.cz' }),
+		msg('a:INBOX:1', '2026-07-01T09:00:00Z', { from: 'a@x.cz' }),
+	]);
+
+	assert.deepEqual(groups.map((g) => g.key), ['b@x.cz', 'a@x.cz']);
+});
+
+test('groupSenders by domain collects a brand mailing from several addresses', () => {
+	// The case the address axis gets wrong: one brand, three sending mailboxes,
+	// and a sender that randomises its local part per message.
+	const messages = [
+		msg('a:INBOX:4', '2026-07-17T09:00:00Z', { from: 'Banka <info@my.bank.example>' }),
+		msg('a:INBOX:3', '2026-07-15T09:00:00Z', { from: 'Banka <info@news.bank.example>' }),
+		msg('a:INBOX:2', '2026-07-07T09:00:00Z', { from: 'Výhody <vyhody@news.bank.example>' }),
+		msg('a:INBOX:1', '2026-07-06T09:00:00Z', { from: 'Chat <no-reply-aaa@chat.example>' }),
+		msg('a:INBOX:0', '2026-07-06T08:00:00Z', { from: 'Chat <no-reply-bbb@chat.example>' }),
+	];
+
+	// By address every one of those is its own group.
+	assert.equal(groupSenders(messages, 'sender').length, 5);
+
+	const byDomain = groupSenders(messages, 'domain');
+	assert.deepEqual(byDomain.map((g) => g.key), ['news.bank.example', 'chat.example', 'my.bank.example']);
+
+	// The sending addresses stay reported: --from/--exclude-from need them.
+	assert.deepEqual(byDomain[0].addresses, ['info@news.bank.example', 'vyhody@news.bank.example']);
+	assert.deepEqual(byDomain[0].names, ['Banka', 'Výhody']);
+	assert.equal(byDomain[1].count, 2);
+});
+
+test('JSON separates the payload size from the number of matches', () => {
+	// The trap this guards: reading `count` as a total understates the mailbox by
+	// whatever --limit happened to be, silently and plausibly.
+	const captured = [];
+	const log = console.log;
+	console.log = (line) => captured.push(line);
+	try {
+		const page = [msg('a:INBOX:2', '2026-07-06T09:00:00Z'), msg('a:INBOX:1', '2026-07-05T09:00:00Z')];
+		printDigest(page, [], { from: new Date(2026, 6, 1), until: null, label: 'last 30d' },
+			{ json: true, offset: 0, limit: 2 }, null, { matched: 433, totalUnits: 433 });
+	} finally {
+		console.log = log;
+	}
+
+	const out = JSON.parse(captured.join('\n'));
+	assert.equal(out.count, 2); // what came back
+	assert.equal(out.matched, 433); // what the search found
+	assert.equal(out.limit, 2);
+	assert.equal(out.offset, 0);
+	assert.equal(out.groupCount, undefined); // no grouping was asked for
+});
+
+test('JSON reports the group total when grouping', () => {
+	const captured = [];
+	const log = console.log;
+	console.log = (line) => captured.push(line);
+	try {
+		const group = groupSenders([msg('a:INBOX:1', '2026-07-05T09:00:00Z', { from: 'a@x.example' })]);
+		printDigest(group[0].messages, [], { from: new Date(2026, 6, 1), until: null, label: 'last 30d' },
+			{ json: true, offset: 0, limit: 50, groupBy: 'sender' }, group, { matched: 21, totalUnits: 13 });
+	} finally {
+		console.log = log;
+	}
+
+	const out = JSON.parse(captured.join('\n'));
+	assert.equal(out.matched, 21);
+	assert.equal(out.groupCount, 13); // 13 senders matched, this page holds one
+	assert.equal(out.senders.length, 1);
+});
+
+test('senderDomain takes everything after the last @', () => {
+	assert.equal(senderDomain('Nástroje <akce@na.shop.example>'), 'na.shop.example');
+	// A local part may itself contain an @ when quoted; the domain is the last.
+	assert.equal(senderDomain('"weird@name" <x@y.example>'), 'y.example');
+	assert.equal(senderDomain('bare@example.com'), 'example.com');
 });
 
 test('groupThreads survives a reference cycle', () => {
@@ -216,12 +355,12 @@ test('selectLinks reports what it cut instead of dropping it silently', () => {
 test('--links takes an optional "all", without eating the next flag', () => {
 	assert.equal(parseArgs(['--links']).links, true);
 	assert.equal(parseArgs(['--links', 'all']).links, 'all');
-	assert.equal(parseArgs(['--links', 'all', '--threads']).threads, true);
+	assert.equal(parseArgs(['--links', 'all', '--threads']).groupBy, 'thread');
 
 	// The value is optional, so a following flag must survive.
 	const opts = parseArgs(['--links', '--threads']);
 	assert.equal(opts.links, true);
-	assert.equal(opts.threads, true);
+	assert.equal(opts.groupBy, 'thread');
 
 	// Links are read out of the body, so suppressing it is a contradiction.
 	assert.throws(() => parseArgs(['--links', '--no-snippet']), /cannot be combined with --no-snippet/);
@@ -233,9 +372,17 @@ test('header arguments are validated up front', () => {
 	assert.throws(() => parseArgs(['--unsubscribe', 'a:b']), /expects <account>/);
 
 	assert.equal(parseArgs(['--headers', 'gmail:INBOX:5', '--all-headers']).allHeaders, true);
-	assert.equal(parseArgs(['--unsubscribe', 'gmail:INBOX:5']).unsubscribe, 'gmail:INBOX:5');
+	assert.deepEqual(parseArgs(['--unsubscribe', 'gmail:INBOX:5']).unsubscribes, ['gmail:INBOX:5']);
 	// Unlike --delete, --unsubscribe is readable without --yes; --yes only arms it.
 	assert.equal(parseArgs(['--unsubscribe', 'gmail:INBOX:5']).yes, undefined);
+});
+
+test('--unsubscribe takes a list, like --delete', () => {
+	const opts = parseArgs(['--unsubscribe', 'gmail:INBOX:5,gmail:INBOX:7', '--unsubscribe', 'work:INBOX:9']);
+	assert.deepEqual(opts.unsubscribes, ['gmail:INBOX:5', 'gmail:INBOX:7', 'work:INBOX:9']);
+	// Every ref is checked up front: one typo must not surface halfway through
+	// a batch, after requests have already gone out to earlier senders.
+	assert.throws(() => parseArgs(['--unsubscribe', 'gmail:INBOX:5,gmail:INBOX']), /expects <account>/);
 });
 
 test('headerLines keeps order and the sender\'s own capitalisation', () => {
@@ -287,7 +434,19 @@ test('paging arguments are validated', () => {
 	assert.equal(parseArgs([]).offset, 0);
 	assert.equal(parseArgs(['--offset', '50']).offset, 50);
 	assert.equal(parseArgs(['--from', 'novak']).sender, 'novak');
-	assert.equal(parseArgs(['--threads']).threads, true);
+	assert.equal(parseArgs(['--threads']).groupBy, 'thread');
+});
+
+test('--group-by accepts only the axes that exist', () => {
+	assert.equal(parseArgs(['--group-by', 'sender']).groupBy, 'sender');
+	assert.equal(parseArgs(['--group-by', 'domain']).groupBy, 'domain');
+	assert.equal(parseArgs(['--group-by', 'thread']).groupBy, 'thread');
+	assert.equal(parseArgs([]).groupBy, undefined);
+	assert.throws(() => parseArgs(['--group-by', 'subject']), /expects thread, sender, domain/);
+	// A census downloads no bodies, so there is nothing to find links in.
+	assert.throws(() => parseArgs(['--group-by', 'sender', '--links']), /cannot be combined with --group-by sender/);
+	assert.throws(() => parseArgs(['--group-by', 'domain', '--links']), /cannot be combined with --group-by domain/);
+	assert.equal(parseArgs(['--group-by', 'thread', '--links']).links, true);
 });
 
 test('parseHeaders unfolds continuation lines and lowercases names', () => {

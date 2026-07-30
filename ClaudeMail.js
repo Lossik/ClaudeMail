@@ -67,6 +67,10 @@ Search (runs on the IMAP server, not after downloading):
   --from <text>      Match the From header (--sender is an alias)
   --subject <text>   Match the subject
   --text <text>      Match the message body
+  --exclude-from <t> Drop messages whose From matches <t> (repeatable). Runs as
+                     an IMAP NOT, so excluded mail is never downloaded or
+                     counted. The needle is literal - no comma splitting
+  --exclude-subject <t>  The same for the subject (repeatable)
 
 Filters:
   --unread           Only unseen messages
@@ -75,11 +79,18 @@ Filters:
   --spam             Look in the Junk/Spam folder instead of INBOX
 
 Grouping and paging:
-  --threads          Group messages into conversations (Message-ID/References).
-                     Paging then works on whole threads, so one is never split
-  --limit <n>        Page size: messages, or threads with --threads (default 50)
+  --group-by <axis>  How to group the listing, loudest group first. Paging then
+                     works on whole groups, so one is never split:
+                       thread  conversations, via Message-ID/References
+                       sender  one group per sender address
+                       domain  one group per sender domain - use this when a
+                               brand mails from several addresses, or randomises
+                               the local part per message
+                     sender/domain are a census: no bodies are downloaded
+  --threads          Alias for --group-by thread
+  --limit <n>        Page size: messages, or groups with --group-by (default 50)
   --offset <n>       Skip the newest <n> - page with --limit
-  --max-scan <n>     With --threads, how many messages to scan for thread
+  --max-scan <n>     With --group-by, how many messages to scan for group
                      membership (default 1000)
   --links [all]      Print full URLs found in the body (snippets shorten them).
                      Plain --links hides unsubscribe/tracking/footer links;
@@ -141,6 +152,9 @@ function parseArgs(argv) {
 		folders: [],
 		deletes: [],
 		moves: [],
+		unsubscribes: [],
+		excludeFrom: [],
+		excludeSubject: [],
 		limit: 50,
 		offset: 0,
 		maxScan: 1000,
@@ -163,7 +177,7 @@ function parseArgs(argv) {
 			case '--body': opts.body = value(); break;
 			case '--headers': opts.headers = value(); break;
 			case '--all-headers': opts.allHeaders = true; break;
-			case '--unsubscribe': opts.unsubscribe = value(); break;
+			case '--unsubscribe': opts.unsubscribes.push(...value().split(',').map((s) => s.trim()).filter(Boolean)); break;
 			case '--since': opts.since = value(); break;
 			case '--until': opts.until = value(); break;
 			case '--date': opts.date = value(); break;
@@ -177,7 +191,13 @@ function parseArgs(argv) {
 			case '--sender': case '--from': opts.sender = value(); break;
 			case '--subject': opts.subject = value(); break;
 			case '--text': opts.text = value(); break;
-			case '--threads': opts.threads = true; break;
+			// Search needles stay literal: splitting them on commas would quietly
+			// change what a filter matches, and a ref= token is the only kind of
+			// value here that is safe to split.
+			case '--exclude-from': opts.excludeFrom.push(value()); break;
+			case '--exclude-subject': opts.excludeSubject.push(value()); break;
+			case '--threads': opts.groupBy = 'thread'; break;
+			case '--group-by': opts.groupBy = value(); break;
 			case '--limit': opts.limit = Number(value()); break;
 			case '--offset': opts.offset = Number(value()); break;
 			case '--max-scan': opts.maxScan = Number(value()); break;
@@ -229,7 +249,15 @@ function parseArgs(argv) {
 	if (opts.moveTo && !opts.moves.length) throw new Error('--move-to only applies to --move');
 	if (opts.body) parseRef(opts.body, '--body');
 	if (opts.headers) parseRef(opts.headers, '--headers');
-	if (opts.unsubscribe) parseRef(opts.unsubscribe, '--unsubscribe');
+	for (const ref of opts.unsubscribes) parseRef(ref, '--unsubscribe');
+	if (opts.groupBy && !GROUP_AXES.includes(opts.groupBy)) {
+		throw new Error(`--group-by expects ${GROUP_AXES.join(', ')} (got "${opts.groupBy}")`);
+	}
+	// A sender census never downloads bodies, so there is nothing to take links
+	// out of. Narrow with --from instead and leave the grouping off.
+	if (opts.links && CENSUS_AXES.includes(opts.groupBy)) {
+		throw new Error(`--links cannot be combined with --group-by ${opts.groupBy} (that mode reads no bodies) - use --from <sender> instead`);
+	}
 	if (opts.allHeaders && !opts.headers) throw new Error('--all-headers only applies to --headers');
 	if (opts.attachments) parseRef(opts.attachments, '--attachments');
 	if (opts.save) parseRef(opts.save, '--save');
@@ -244,6 +272,11 @@ function parseArgs(argv) {
 
 	return opts;
 }
+
+const GROUP_AXES = ['thread', 'sender', 'domain'];
+
+// Axes that count senders rather than read conversations: no bodies, no links.
+const CENSUS_AXES = ['sender', 'domain'];
 
 const DATE_ONLY = /^\d{4}-\d{2}-\d{2}$/;
 
@@ -434,6 +467,18 @@ function buildQuery(window, opts) {
 	if (opts.sender) query.from = opts.sender;
 	if (opts.subject) query.subject = opts.subject;
 	if (opts.text) query.body = opts.text;
+
+	// Exclusions belong on the server for the same reason the rest of the search
+	// does, plus one of its own: mail that never arrives is also never counted,
+	// so "of N matches" keeps meaning what it says. Several exclusions become
+	// NOT (a OR b OR ...), which is NOT a AND NOT b AND ... - drop them all.
+	const excluded = [
+		...(opts.excludeFrom || []).map((text) => ({ from: text })),
+		...(opts.excludeSubject || []).map((text) => ({ subject: text })),
+	];
+	if (excluded.length === 1) query.not = excluded[0];
+	else if (excluded.length > 1) query.not = { or: excluded };
+
 	return query;
 }
 
@@ -483,12 +528,13 @@ async function fetchFolder(client, account, folder, window, opts, isJunk = false
 
 	messages.sort((a, b) => b.date - a.date);
 
-	// Without --threads, the newest offset+limit from each folder is enough
-	// even in the worst case where the whole page comes from one of them.
-	// With --threads we cannot trim yet: a conversation may reach anywhere in
-	// the window, and cutting here would split it across pages. --max-scan
-	// bounds that instead. `total` always reports what actually matched.
-	const keep = opts.threads ? opts.maxScan : opts.offset + opts.limit;
+	// Without grouping, the newest offset+limit from each folder is enough even
+	// in the worst case where the whole page comes from one of them.
+	// With --group-by we cannot trim yet: a conversation - or a sender's mail -
+	// may reach anywhere in the window, and cutting here would split a group
+	// across pages. --max-scan bounds that instead. `total` always reports what
+	// actually matched.
+	const keep = opts.groupBy ? opts.maxScan : opts.offset + opts.limit;
 	return { messages: messages.slice(0, keep), total: messages.length };
 }
 
@@ -525,6 +571,71 @@ async function fillSnippets(accounts, messages, opts) {
 			// Snippets are a nice-to-have; the listing itself is already complete.
 		}
 	}
+}
+
+const ADDRESS_AT_END = /<([^<>]+)>\s*$/;
+
+/** The address out of "Name <addr>", lowercased; the whole value if unadorned. */
+function senderAddress(from) {
+	return (from.match(ADDRESS_AT_END)?.[1] ?? from).trim().toLowerCase();
+}
+
+/** The display name out of "Name <addr>", or '' when there is none. */
+function senderName(from) {
+	const match = from.match(ADDRESS_AT_END);
+	return match ? from.slice(0, match.index).trim().replace(/^"|"$/g, '') : '';
+}
+
+/** The domain of a sender address, which is the part that identifies a brand. */
+function senderDomain(from) {
+	const address = senderAddress(from);
+	return address.slice(address.lastIndexOf('@') + 1) || address;
+}
+
+/**
+ * Groups messages by sender, keyed on the address (or its domain) rather than
+ * the display name: one address happily varies its name between sendings ("CK
+ * Čedok" and "Cestovní kancelář Čedok" are the same info@ mailbox), and
+ * splitting those apart understates how much it sends - the one thing this mode
+ * is for. Loudest sender first, because the question is who fills the mailbox.
+ *
+ * "domain" exists because the address alone splits senders that should count as
+ * one: a brand mails from news.example.com and my.example.com, and some senders
+ * randomise the local part per message, which turns every single message into
+ * its own group.
+ *
+ * Expects `messages` already sorted newest-first, so each group is too.
+ */
+function groupSenders(messages, axis = 'sender') {
+	const keyOf = axis === 'domain' ? senderDomain : senderAddress;
+	const groups = new Map();
+
+	for (const msg of messages) {
+		const key = keyOf(msg.from);
+		if (!groups.has(key)) {
+			groups.set(key, { key, addresses: [], names: [], messages: [], unread: 0, tags: new Set() });
+		}
+
+		const group = groups.get(key);
+		group.messages.push(msg);
+		if (msg.unread) group.unread++;
+
+		const address = senderAddress(msg.from);
+		if (!group.addresses.includes(address)) group.addresses.push(address);
+		const name = senderName(msg.from);
+		if (name && !group.names.includes(name)) group.names.push(name);
+		for (const tag of msg.tags) group.tags.add(tag);
+	}
+
+	return [...groups.values()]
+		.map((group) => ({
+			...group,
+			tags: [...group.tags],
+			count: group.messages.length,
+			latest: group.messages[0],
+			oldest: group.messages[group.messages.length - 1],
+		}))
+		.sort((a, b) => b.count - a.count || b.latest.date - a.latest.date);
 }
 
 const ID_PATTERN = /<[^<>]+>/g;
@@ -994,40 +1105,75 @@ function startOfDay(date) {
 
 const pad = (n) => String(n).padStart(2, '0');
 const fmtDateTime = (d) => `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+// A sender census lists one line per message, where the clock is noise.
+const fmtDate = (d) => `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
 
 // ------------------------------------------------------------------ output
 
 // How many of a thread's newest messages get a body preview. See printThread.
 const THREAD_SNIPPETS = 2;
 
-function printDigest(messages, errors, window, opts, threads = null) {
+// How many of a sender's messages the text output lists before summarising the
+// rest. JSON is uncapped - a machine reader wants every ref.
+const SENDER_PREVIEW = 10;
+
+function printDigest(messages, errors, window, opts, groups = null, paging = null) {
+	const senderMode = CENSUS_AXES.includes(opts.groupBy);
+
 	if (opts.json) {
 		const plain = (m) => ({ ...m, date: m.date.toISOString(), textPart: undefined, htmlPart: undefined });
 		console.log(JSON.stringify({
 			window: { from: window.from.toISOString(), until: window.until?.toISOString() ?? null, label: window.label },
+			// `count` is the size of this payload, which --limit caps; `matched` is
+			// what the search actually found. Both are reported because reading the
+			// first as the second silently understates a mailbox by whatever the
+			// page size happens to be - the text output says "of 213" for the same
+			// reason, and machine output must not be the less honest of the two.
 			count: messages.length,
+			matched: paging?.matched ?? messages.length,
+			...(groups ? { groupCount: paging?.totalUnits ?? groups.length } : {}),
+			offset: opts.offset,
+			limit: opts.limit,
 			errors,
-			...(threads
+			...(groups && senderMode
 				? {
-					threads: threads.map((t) => ({
-						subject: t.latest.subject,
-						count: t.messages.length,
-						unread: t.unread,
-						participants: t.participants,
-						latest: plain(t.latest),
-						recent: t.messages.slice(0, THREAD_SNIPPETS).map(plain),
-						refs: t.messages.map((m) => m.ref),
+					senders: groups.map((g) => ({
+						key: g.key,
+						addresses: g.addresses,
+						names: g.names,
+						count: g.count,
+						unread: g.unread,
+						tags: g.tags,
+						newest: g.latest.date.toISOString(),
+						oldest: g.oldest.date.toISOString(),
+						messages: g.messages.map(plain),
 					})),
 				}
-				: { messages: messages.map(plain) }),
+				: groups
+					? {
+						threads: groups.map((t) => ({
+							subject: t.latest.subject,
+							count: t.messages.length,
+							unread: t.unread,
+							participants: t.participants,
+							latest: plain(t.latest),
+							recent: t.messages.slice(0, THREAD_SNIPPETS).map(plain),
+							refs: t.messages.map((m) => m.ref),
+						})),
+					}
+					: { messages: messages.map(plain) }),
 		}, null, 2));
 		return;
 	}
 
-	if (threads) {
-		console.log(`# ${threads.length} thread(s) in ${messages.length} message(s) - ${window.label}`);
-		if (!threads.length) console.log('(nothing new)');
-		for (const thread of threads) printThread(thread, opts);
+	if (groups && senderMode) {
+		console.log(`# ${groups.length} ${opts.groupBy}(s) in ${messages.length} message(s) - ${window.label}`);
+		if (!groups.length) console.log('(nothing new)');
+		for (const group of groups) printSenderGroup(group);
+	} else if (groups) {
+		console.log(`# ${groups.length} thread(s) in ${messages.length} message(s) - ${window.label}`);
+		if (!groups.length) console.log('(nothing new)');
+		for (const thread of groups) printThread(thread, opts);
 	} else {
 		console.log(`# ${messages.length} message(s) - ${window.label}`);
 		if (!messages.length) console.log('(nothing new)');
@@ -1035,6 +1181,39 @@ function printDigest(messages, errors, window, opts, threads = null) {
 	}
 
 	for (const err of errors) console.log(`\n! ${err}`);
+}
+
+/**
+ * One block per sender: the counts first, because that is what the mode is
+ * asked for, then the subjects with their refs so the next command can act on
+ * them without a second listing.
+ */
+function printSenderGroup(group) {
+	console.log('');
+	const names = group.names.length ? ` | ${group.names.join(' / ')}` : '';
+	console.log(`${group.key}${names}`);
+	// Grouping by domain hides which mailbox actually sent it, and that is what
+	// --from and --exclude-from need. Name them, unless there is only the one
+	// that the key already spells out.
+	if (group.addresses.length > 1 || group.addresses[0] !== group.key) {
+		console.log(`  via ${group.addresses.slice(0, 4).join(', ')}${group.addresses.length > 4 ? `, +${group.addresses.length - 4} more` : ''}`);
+	}
+
+	const dates = group.count > 1
+		? `${fmtDate(group.oldest.date)} .. ${fmtDate(group.latest.date)}`
+		: fmtDate(group.latest.date);
+	const unread = group.unread ? `, ${group.unread} unread` : '';
+	const tags = group.tags.length ? ` [${group.tags.join(', ')}]` : '';
+	console.log(`  ${group.count} msg(s)${unread} | ${dates}${tags}`);
+
+	for (const msg of group.messages.slice(0, SENDER_PREVIEW)) {
+		console.log(`    ${fmtDate(msg.date)}${msg.unread ? ' *' : '  '} ${truncate(msg.subject, 72)}  ref=${msg.ref}`);
+	}
+
+	const hidden = group.count - SENDER_PREVIEW;
+	if (hidden > 0) {
+		console.log(`    (+${hidden} more - all of them: --from ${group.key}, or --json for every ref)`);
+	}
 }
 
 function printMessage(msg, opts) {
@@ -1390,29 +1569,94 @@ function parseUnsubscribe(headers) {
  * server, so it stays deliberately narrow: an RFC 8058 POST over https and
  * nothing else. There is no SMTP here, so a mailto: option can only be printed.
  */
-async function unsubscribe(accounts, ref, opts) {
-	const { accountName, folder, uid } = parseRef(ref, '--unsubscribe');
-	const account = resolveAccount(accounts, accountName);
+/**
+ * Reads the List-Unsubscribe of every requested message, sharing one connection
+ * per account: a batch of twenty used to mean twenty logins.
+ *
+ * Returns a Map ref -> message info, with `error` set where the read failed, so
+ * one unreadable ref cannot abort the refs after it.
+ */
+async function readUnsubscribeTargets(accounts, refs) {
+	const groups = new Map();
+	for (const ref of refs) {
+		const { accountName, folder, uid } = parseRef(ref, '--unsubscribe');
+		resolveAccount(accounts, accountName); // Fail before connecting anywhere.
+		const key = `${accountName} ${folder}`;
+		if (!groups.has(key)) groups.set(key, { accountName, folder, items: [] });
+		groups.get(key).items.push({ ref, uid });
+	}
 
-	const message = await withClient(account, async (client) => {
-		const lock = await client.getMailboxLock(folder, { readOnly: true });
+	const found = new Map();
+
+	for (const { accountName, folder, items } of groups.values()) {
+		const account = resolveAccount(accounts, accountName);
 		try {
-			const msg = await client.fetchOne(uid, { headers: true, envelope: true }, { uid: true });
-			if (!msg?.headers) throw new Error(`Message ${ref} not found`);
+			await withClient(account, async (client) => {
+				const lock = await client.getMailboxLock(folder, { readOnly: true });
+				try {
+					for (const { ref, uid } of items) {
+						const msg = await client.fetchOne(uid, { headers: true, envelope: true }, { uid: true });
+						if (!msg?.headers) {
+							found.set(ref, { error: `Message ${ref} not found` });
+							continue;
+						}
 
-			const headers = parseHeaders(msg.headers);
-			return {
-				subject: msg.envelope?.subject || '(no subject)',
-				from: formatAddress(msg.envelope?.from?.[0]),
-				// Gmail states its spam verdict only by filing the message in Junk,
-				// and that is exactly the case this guards against.
-				tags: classify(headers, /spam|junk|nevyžádan/i.test(folder)),
-				...parseUnsubscribe(headers),
-			};
-		} finally {
-			lock.release();
+						const headers = parseHeaders(msg.headers);
+						found.set(ref, {
+							subject: msg.envelope?.subject || '(no subject)',
+							from: formatAddress(msg.envelope?.from?.[0]),
+							// Gmail states its spam verdict only by filing the message in
+							// Junk, and that is exactly the case this guards against.
+							tags: classify(headers, /spam|junk|nevyžádan/i.test(folder)),
+							...parseUnsubscribe(headers),
+						});
+					}
+				} finally {
+					lock.release();
+				}
+			});
+		} catch (err) {
+			for (const { ref } of items) {
+				if (!found.has(ref)) found.set(ref, { error: `${accountName}/${folder}: ${err.message}` });
+			}
 		}
-	});
+	}
+
+	return found;
+}
+
+/**
+ * Runs --unsubscribe over every requested ref. Batching shares connections and
+ * prints one tally at the end; it deliberately does NOT pool the decisions -
+ * every refusal below is re-evaluated per message, because a batch must not
+ * become a way to push through what would be declined one at a time.
+ */
+async function unsubscribeAll(accounts, opts) {
+	const refs = opts.unsubscribes;
+	const targets = await readUnsubscribeTargets(accounts, refs);
+	const tally = { unsubscribed: 0, refused: 0, failed: 0, noHeader: 0, oneClick: 0, browser: 0 };
+
+	for (const ref of refs) {
+		if (refs.length > 1) console.log(`\n=== ${ref}`);
+		const outcome = await unsubscribeOne(ref, targets.get(ref), opts);
+		tally[outcome]++;
+	}
+
+	if (refs.length > 1) {
+		const parts = opts.yes
+			? [`${tally.unsubscribed} unsubscribed`, `${tally.failed} rejected by the sender`, `${tally.refused} refused here`, `${tally.noHeader} without a List-Unsubscribe`]
+			: [`${tally.oneClick} one-click available`, `${tally.browser} need a browser`, `${tally.noHeader} without a List-Unsubscribe`, `${tally.failed} unreadable`];
+		console.log(`\n# ${refs.length} ref(s): ${parts.filter((p) => !p.startsWith('0 ')).join(', ') || 'nothing to report'}`);
+	}
+}
+
+/** One message's opt-out, printed and - with --yes - performed. */
+async function unsubscribeOne(ref, message, opts) {
+	if (!message || message.error) {
+		console.log(`! ${message?.error || `Message ${ref} not found`}`);
+		process.exitCode = 1;
+		return 'failed';
+	}
 
 	console.log(`${message.from}`);
 	console.log(`${message.subject}${message.tags.length ? `  [${message.tags.join(', ')}]` : ''}`);
@@ -1421,7 +1665,7 @@ async function unsubscribe(accounts, ref, opts) {
 		console.log('\nNo List-Unsubscribe header - this sender offers no machine-readable opt-out.');
 		console.log(`Look for a footer link instead: --body ${ref} --links all`);
 		process.exitCode = 1;
-		return;
+		return 'noHeader';
 	}
 
 	console.log('\nList-Unsubscribe:');
@@ -1431,7 +1675,7 @@ async function unsubscribe(accounts, ref, opts) {
 	if (!opts.yes) {
 		console.log('\nNothing was sent. Add --yes to submit the one-click request'
 			+ `${message.oneClick ? '' : ' (this sender does not support it - the URL has to be opened in a browser)'}.`);
-		return;
+		return message.oneClick ? 'oneClick' : 'browser';
 	}
 
 	// A spam or forged sender learns one thing from an unsubscribe: that the
@@ -1442,7 +1686,7 @@ async function unsubscribe(accounts, ref, opts) {
 		console.log('  address is live and read, to a sender the mail system already distrusts - which is worth');
 		console.log('  more to them than the mail costs you. Delete it or mark it as spam instead.');
 		process.exitCode = 1;
-		return;
+		return 'refused';
 	}
 
 	const target = message.http.find((url) => /^https:\/\//i.test(url));
@@ -1450,7 +1694,7 @@ async function unsubscribe(accounts, ref, opts) {
 		console.log('\n! refusing: no RFC 8058 one-click https target.');
 		console.log('  Without it a request may not unsubscribe anything - open the URL above in a browser.');
 		process.exitCode = 1;
-		return;
+		return 'refused';
 	}
 
 	try {
@@ -1464,13 +1708,16 @@ async function unsubscribe(accounts, ref, opts) {
 
 		if (response.ok) {
 			console.log(`\nunsubscribed: POST ${target} -> ${response.status} ${response.statusText}`);
-		} else {
-			console.log(`\n! the sender rejected the request: ${response.status} ${response.statusText}`);
-			process.exitCode = 1;
+			return 'unsubscribed';
 		}
+
+		console.log(`\n! the sender rejected the request: ${response.status} ${response.statusText}`);
+		process.exitCode = 1;
+		return 'failed';
 	} catch (err) {
 		console.log(`\n! could not reach the unsubscribe endpoint: ${err.message}`);
 		process.exitCode = 1;
+		return 'failed';
 	}
 }
 
@@ -1548,8 +1795,8 @@ async function main() {
 		return;
 	}
 
-	if (opts.unsubscribe) {
-		await unsubscribe(allAccounts, opts.unsubscribe, opts);
+	if (opts.unsubscribes.length) {
+		await unsubscribeAll(allAccounts, opts);
 		return;
 	}
 
@@ -1593,25 +1840,25 @@ async function main() {
 	// said in it. `matched` counts what the search found, so these numbers
 	// stay honest regardless of --limit.
 	let shown;
-	let threads = null;
+	let groups = null;
 	let unit = 'message';
 	let totalUnits = matched;
 
-	if (opts.threads) {
-		const all = groupThreads(messages);
-		threads = all.slice(opts.offset, opts.offset + opts.limit);
-		shown = threads.flatMap((t) => t.messages);
-		unit = 'thread';
+	if (opts.groupBy) {
+		const all = CENSUS_AXES.includes(opts.groupBy) ? groupSenders(messages, opts.groupBy) : groupThreads(messages);
+		groups = all.slice(opts.offset, opts.offset + opts.limit);
+		shown = groups.flatMap((g) => g.messages);
+		unit = opts.groupBy;
 		totalUnits = all.length;
 
 		if (messages.length < matched) {
-			errors.push(`scanned the newest ${messages.length} of ${matched} matches (--max-scan ${opts.maxScan}) - threads reaching further back may be incomplete; narrow with --since/--from or raise --max-scan`);
+			errors.push(`scanned the newest ${messages.length} of ${matched} matches (--max-scan ${opts.maxScan}) - ${unit}s reaching further back may be incomplete; narrow with --since/--from/--exclude-from or raise --max-scan`);
 		}
 	} else {
 		shown = messages.slice(opts.offset, opts.offset + opts.limit);
 	}
 
-	const pageSize = threads ? threads.length : shown.length;
+	const pageSize = groups ? groups.length : shown.length;
 	if (totalUnits > opts.offset + pageSize) {
 		errors.push(`showing ${unit}s ${opts.offset + 1}-${opts.offset + pageSize} of ${totalUnits} - next page: --offset ${opts.offset + opts.limit}`);
 	}
@@ -1620,12 +1867,15 @@ async function main() {
 	}
 
 	// Only what is actually printed deserves a body download - and in thread
-	// mode that is just the newest few messages of each conversation.
-	if (opts.snippet) {
-		await fillSnippets(selected, threads ? threads.flatMap((t) => t.messages.slice(0, THREAD_SNIPPETS)) : shown, opts);
+	// mode that is just the newest few messages of each conversation. A sender
+	// census downloads none at all: it answers "who and how much", and paying
+	// for hundreds of bodies to print a subject line each would be the slowest
+	// possible way to do that.
+	if (opts.snippet && !CENSUS_AXES.includes(opts.groupBy)) {
+		await fillSnippets(selected, groups ? groups.flatMap((t) => t.messages.slice(0, THREAD_SNIPPETS)) : shown, opts);
 	}
 
-	printDigest(shown, errors, window ?? resolveWindow(opts, null), opts, threads);
+	printDigest(shown, errors, window ?? resolveWindow(opts, null), opts, groups, { matched, totalUnits });
 
 	if (opts.sinceLast) await writeFile(STATE_PATH, JSON.stringify(state, null, 2));
 
@@ -1646,6 +1896,7 @@ export {
 	cleanBody, htmlToText, truncate, findTextPart, hasAttachment, formatAddress,
 	listAttachments, safeFilename, uniquePath, fmtSize, findPart,
 	parseHeaders, headerLines, decodeWords, classify, buildQuery, groupThreads,
+	groupSenders, senderAddress, senderName, senderDomain,
 	collectIds, firstId, extractLinks, extractHrefs, selectLinks, decodeEntities,
-	parseUnsubscribe,
+	parseUnsubscribe, printDigest,
 };

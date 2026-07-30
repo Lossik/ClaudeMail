@@ -199,32 +199,77 @@ The UID changes: IMAP MOVE re-creates the message in the destination, so the
 date survive, so a restored message reappears at its original position in a
 listing sorted by date, not at the top.
 
-### Threads, search, paging
+### Grouping, search, paging
 
-`--threads` groups messages into conversations using `Message-ID`, `References`
-and `In-Reply-To` only (union-find over those identifiers). Subject is
-deliberately **not** used as a fallback key — it would merge unrelated mail that
-happens to share a subject like "Invoice". Each block shows the time span,
-message count, participants and a preview of the newest messages; `refs=` lists
-every message in the thread.
+`--group-by` chooses the axis, loudest group first:
+
+```bash
+node ClaudeMail.js --group-by thread --since 1d   # conversations (= --threads)
+node ClaudeMail.js --group-by sender --since 30d  # one group per address
+node ClaudeMail.js --group-by domain --since 30d  # one group per domain
+```
+
+`thread` groups using `Message-ID`, `References` and `In-Reply-To` only
+(union-find over those identifiers). Subject is deliberately **not** used as a
+fallback key — it would merge unrelated mail that happens to share a subject
+like "Invoice". Each block shows the time span, message count, participants and
+a preview of the newest messages; `refs=` lists every message in the thread.
+
+`sender` and `domain` are a census: who fills this mailbox, and how much. They
+key on the **address**, never the display name — one mailbox varies its name
+between sendings, and splitting those apart understates its volume. `domain`
+exists because the address alone still splits senders that should count as one:
+a brand mails from `news.example.com` and `my.example.com`, and some senders
+randomise the local part per message, which makes every single message its own
+group. Both list the sending addresses under `via`, since that is what `--from`
+and `--exclude-from` need.
+
+Neither census downloads bodies — the mode answers "who and how much", and
+paying for hundreds of bodies to print one subject line each would be the
+slowest possible way to do it. `--links` is therefore rejected in those modes.
+The text output lists ten messages per group and summarises the rest; `--json`
+is uncapped and carries every `ref`.
 
 `--from`, `--subject` and `--text` are translated into IMAP
 `SEARCH FROM/SUBJECT/BODY` and run on the server. The difference is an order of
 magnitude: searching two months of mail (2314 messages) takes seconds instead of
 downloading every header first.
 
-`--offset` pages. Without `--threads`, the newest `offset+limit` messages are
+`--exclude-from` and `--exclude-subject` (both repeatable) are the same idea
+inverted, compiled to `NOT` and likewise run on the server:
+
+```bash
+# "newsletters, but not the notification systems"
+node ClaudeMail.js --since 30d --only-bulk --group-by domain --exclude-from gitlab
+```
+
+Several exclusions become `NOT (a OR b OR …)`, which drops every one of them.
+Running server-side matters beyond speed: mail that never arrives is also never
+counted, so "of 213 matches" keeps meaning what it says. The needles are
+literal — unlike a `ref=` list, they are never split on commas, because that
+would quietly change what a filter matches.
+
+`--offset` pages. Without `--group-by`, the newest `offset+limit` messages are
 taken from each folder, which is sufficient for global paging even in the worst
 case where an entire page comes from a single folder.
 
-With `--threads`, **grouping happens before paging** and pages consist of whole
-threads, so a conversation is never split across pages — otherwise it would
-appear to hold fewer messages than it really does. A thread can reach anywhere
-into the window, so pre-trimming is impossible in that mode; `--max-scan`
-(default 1000) bounds the scan instead and warns when threads may be incomplete.
+With `--group-by`, **grouping happens before paging** and pages consist of whole
+groups, so a conversation — or a sender's mail — is never split across pages;
+otherwise it would appear to hold fewer messages than it really does. A group
+can reach anywhere into the window, so pre-trimming is impossible in that mode;
+`--max-scan` (default 1000) bounds the scan instead and warns when groups may be
+incomplete.
 
 The reported count ("of 213") is the real number of matches, not the number of
-messages downloaded.
+messages downloaded. `--json` reports both numbers separately, because one of
+them capped by `--limit` looks exactly as plausible as the other:
+
+| Field | Meaning |
+|---|---|
+| `count` | messages in this payload — `--limit` caps it |
+| `matched` | messages the search found, before `offset`/`limit` |
+| `groupCount` | groups the search found, when `--group-by` is on |
+| `offset`, `limit` | the paging that produced this payload |
 
 Each thread block previews its **two newest** messages, not just the newest one.
 Systems like GitLab send a status notification ("Reassigned issue", "Issue was
@@ -264,6 +309,7 @@ node ClaudeMail.js --headers gmail:INBOX:12345               # the notable ones
 node ClaudeMail.js --headers gmail:INBOX:12345 --all-headers # everything
 node ClaudeMail.js --unsubscribe gmail:INBOX:12345           # show the options
 node ClaudeMail.js --unsubscribe gmail:INBOX:12345 --yes     # actually leave
+node ClaudeMail.js --unsubscribe a:INBOX:1,a:INBOX:2         # a list, like --delete
 ```
 
 `--headers` prints the fields that answer a question someone actually asks —
@@ -283,6 +329,15 @@ that:
 - a message tagged `spam` or `auth-fail` is refused outright. Unsubscribing
   confirms that the address is live and read, which is worth more to that kind
   of sender than the mail costs the recipient.
+
+`--unsubscribe` takes a list (comma-separated, or repeat the flag) and shares
+one connection per account, so a batch of twenty is one login rather than
+twenty. Batching changes nothing else: **every refusal above is re-evaluated per
+message**, because a batch must not become a way to push through what would be
+declined one at a time. A run over more than one ref ends with a tally
+(`# 13 ref(s): 12 unsubscribed, 1 rejected by the sender`), and without `--yes`
+that tally is the triage — how many support one-click, how many need a browser,
+how many offer nothing.
 
 ### Time window
 
