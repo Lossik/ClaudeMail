@@ -249,9 +249,32 @@ counted, so "of 213 matches" keeps meaning what it says. The needles are
 literal — unlike a `ref=` list, they are never split on commas, because that
 would quietly change what a filter matches.
 
-`--offset` pages. Without `--group-by`, the newest `offset+limit` messages are
-taken from each folder, which is sufficient for global paging even in the worst
-case where an entire page comes from a single folder.
+**Prefer `--all` over paging.** Paging is stateless — every page re-runs the
+whole search — and the cost of a run is dominated by fixed overhead, not by the
+messages:
+
+| | measured |
+|---|---|
+| `--accounts` (config only, no IMAP) | 741 ms |
+| one-hour window, few messages | 1066 ms |
+| 99 messages in one call | 1195 ms |
+| ~1100 messages in one call | 2221 ms |
+| the same 99 messages in 5 pages of 20 | **5736 ms** |
+
+So a run costs ~740 ms of Node startup plus ~325 ms of connect/login/SEARCH,
+against roughly **1 ms per message**. N pages pay that setup N times: a month of
+mail taken whole is 2.2 s, the same month paged by fifties is 22 calls and ~24 s.
+`--all` removes the cap on both `--limit` and `--max-scan` so one call can take
+everything without having to guess a big number — and it refuses to combine with
+either flag rather than silently overriding a cap that was asked for.
+
+`--offset` pages when you do want it. Without `--group-by`, the newest
+`offset+limit` messages are taken from each folder, which is sufficient for
+global paging even in the worst case where an entire page comes from a single
+folder. Pages are independent queries, not a snapshot: mail arriving between two
+pages shifts everything down, so the last message of one page can reappear on
+the next. Use a closed window (`--since X --until Y`) or `--all` for a stable
+enumeration.
 
 With `--group-by`, **grouping happens before paging** and pages consist of whole
 groups, so a conversation — or a sender's mail — is never split across pages;
@@ -346,6 +369,32 @@ how many offer nothing.
 two forms, so both `--since 2026-07-15 --until 2026-07-20` and
 `--since 30d --until 7d` work. An end *date* is inclusive of that whole day.
 `--date` remains the shorthand for a single day.
+
+`--since-last` reads a per-account checkpoint from `.state.json` and moves it to
+the start of the run, but only for accounts that were fetched successfully.
+
+**It cannot be paged, and the combination is rejected.** A successful run moves
+the checkpoint, so a second page would search the window the first page just
+consumed — which looks exactly like "nothing new" while the remaining messages
+are no longer reachable that way at all. When more matched than fit, the run says
+so and names the day of the *previous* checkpoint, which is the only window that
+still reaches the rest:
+
+```
+! showing 1 of 49 messages - the checkpoint has moved, so the rest is NOT
+  reachable with --offset; re-read it with --since 2026-07-29 (or use --all next time)
+```
+
+Because the checkpoint is per account, two accounts can be at different points.
+The header then names each one rather than describing the whole listing by
+whichever account happened to be fetched first:
+
+```
+# 2 message(s) - gmail: since last check (2026-07-29 03:10) | work: since last check (2026-07-30 02:52)
+```
+
+The reported `from`/`until` widen to cover every account in that case, so they
+never exclude a message that is in the output.
 
 ## Implementation notes
 

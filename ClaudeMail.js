@@ -92,6 +92,10 @@ Grouping and paging:
   --offset <n>       Skip the newest <n> - page with --limit
   --max-scan <n>     With --group-by, how many messages to scan for group
                      membership (default 1000)
+  --all              No cap on either: take the whole match in one call. Prefer
+                     this over paging - a run costs ~1s of process and
+                     connection setup against ~1ms per message, so N pages pay
+                     the setup N times. Cannot be combined with --limit/--max-scan
   --links [all]      Print full URLs found in the body (snippets shorten them).
                      Plain --links hides unsubscribe/tracking/footer links;
                      "--links all" prints every URL, including those
@@ -163,6 +167,10 @@ function parseArgs(argv) {
 		maxSize: 25 * 1048576,
 	};
 
+	// Tracked so --all can refuse to silently override a cap that was asked for.
+	let limitGiven = false;
+	let maxScanGiven = false;
+
 	for (let i = 0; i < argv.length; i++) {
 		const arg = argv[i];
 		const value = () => {
@@ -198,9 +206,10 @@ function parseArgs(argv) {
 			case '--exclude-subject': opts.excludeSubject.push(value()); break;
 			case '--threads': opts.groupBy = 'thread'; break;
 			case '--group-by': opts.groupBy = value(); break;
-			case '--limit': opts.limit = Number(value()); break;
+			case '--limit': opts.limit = Number(value()); limitGiven = true; break;
 			case '--offset': opts.offset = Number(value()); break;
-			case '--max-scan': opts.maxScan = Number(value()); break;
+			case '--max-scan': opts.maxScan = Number(value()); maxScanGiven = true; break;
+			case '--all': opts.all = true; break;
 			// The value is optional, so only the one word that means anything
 			// here is consumed - "--links --threads" must not eat the flag.
 			case '--links': opts.links = argv[i + 1] === 'all' ? (i++, 'all') : true; break;
@@ -227,6 +236,18 @@ function parseArgs(argv) {
 	if (!Number.isFinite(opts.maxScan) || opts.maxScan < 1) throw new Error('--max-scan must be a positive number');
 	if (!Number.isFinite(opts.snippetLen) || opts.snippetLen < 1) throw new Error('--snippet-len must be a positive number');
 
+	// Uncapping happens after the numeric checks, which only accept finite input.
+	// One call for everything beats paging: the cost of a run is ~1s of process
+	// and connection setup against ~1ms per message, so N pages cost N times the
+	// setup no matter where the messages come from.
+	if (opts.all) {
+		if (limitGiven || maxScanGiven) {
+			throw new Error('--all cannot be combined with --limit or --max-scan (it removes both caps)');
+		}
+		opts.limit = Infinity;
+		opts.maxScan = Infinity;
+	}
+
 	// Validate up front, before any config loading or network access, so a
 	// mistyped argument reports itself instead of some later failure.
 	if (opts.since) pointInTime(opts.since, '--since');
@@ -234,6 +255,12 @@ function parseArgs(argv) {
 		pointInTime(opts.until, '--until');
 		if (opts.date) throw new Error('--until cannot be combined with --date (a single day is already a closed range)');
 		if (opts.sinceLast) throw new Error('--until cannot be combined with --since-last');
+	}
+	// A successful --since-last run moves the checkpoint, so the window a second
+	// page would ask for no longer exists: the first page consumed it. Paging
+	// here cannot work, and following the hint would look like "nothing new".
+	if (opts.sinceLast && opts.offset) {
+		throw new Error('--since-last cannot be combined with --offset: the run moves the checkpoint, so page 2 would search a window that is already gone. Take it in one call (--all), or page over an explicit --since');
 	}
 	if (opts.deletes.length) {
 		if (!opts.yes) throw new Error('--delete also requires --yes (guard against deleting mail by accident)');
@@ -271,6 +298,27 @@ function parseArgs(argv) {
 	if (!Number.isFinite(opts.maxSize) || opts.maxSize <= 0) throw new Error('--max-size must be a positive number of MB');
 
 	return opts;
+}
+
+/**
+ * Reduces the per-account windows to the one that gets printed. They are equal
+ * for every selection mode except --since-last, where each account carries its
+ * own checkpoint; when they differ, the label names each account instead of
+ * silently describing the listing by whichever account was fetched first. The
+ * bounds widen to cover all of them, so `from`/`until` never claim a range that
+ * excludes messages actually in the output.
+ */
+function mergeWindows(accountWindows) {
+	if (!accountWindows.length) return null;
+
+	const labels = [...new Set(accountWindows.map((a) => a.window.label))];
+	if (labels.length === 1) return accountWindows[0].window;
+
+	const from = new Date(Math.min(...accountWindows.map((a) => a.window.from.getTime())));
+	const open = accountWindows.some((a) => !a.window.until);
+	const until = open ? null : new Date(Math.max(...accountWindows.map((a) => a.window.until.getTime())));
+
+	return { from, until, label: accountWindows.map((a) => `${a.name}: ${a.window.label}`).join(' | ') };
 }
 
 const GROUP_AXES = ['thread', 'sender', 'domain'];
@@ -1133,7 +1181,8 @@ function printDigest(messages, errors, window, opts, groups = null, paging = nul
 			matched: paging?.matched ?? messages.length,
 			...(groups ? { groupCount: paging?.totalUnits ?? groups.length } : {}),
 			offset: opts.offset,
-			limit: opts.limit,
+			// null means uncapped (--all); JSON has no Infinity to serialise.
+			limit: Number.isFinite(opts.limit) ? opts.limit : null,
 			errors,
 			...(groups && senderMode
 				? {
@@ -1815,12 +1864,12 @@ async function main() {
 	const messages = [];
 	const errors = [];
 	let matched = 0; // Total that matched the search, before offset/limit.
-	let window;
+	const accountWindows = [];
 
 	for (const account of selected) {
 		// --since-last is per account, so each one gets its own window.
 		const accountWindow = resolveWindow(opts, state[account.name]);
-		window ??= accountWindow;
+		accountWindows.push({ name: account.name, window: accountWindow });
 
 		try {
 			const result = await fetchAccount(account, accountWindow, opts);
@@ -1834,6 +1883,11 @@ async function main() {
 	}
 
 	messages.sort((a, b) => b.date - a.date);
+
+	// With --since-last each account has its own checkpoint, so a single label
+	// can describe the wrong range for the others. Name them all rather than
+	// quietly printing whichever account happened to come first.
+	const window = mergeWindows(accountWindows) ?? resolveWindow(opts, null);
 
 	// Paging happens over whole conversations in thread mode, so a thread is
 	// never split across pages - a half-thread would understate how much was
@@ -1860,7 +1914,12 @@ async function main() {
 
 	const pageSize = groups ? groups.length : shown.length;
 	if (totalUnits > opts.offset + pageSize) {
-		errors.push(`showing ${unit}s ${opts.offset + 1}-${opts.offset + pageSize} of ${totalUnits} - next page: --offset ${opts.offset + opts.limit}`);
+		// In --since-last mode the checkpoint has just moved, so --offset would
+		// search a window that no longer exists. Point at the only thing that can
+		// still reach the rest: the day the previous checkpoint fell on.
+		errors.push(opts.sinceLast
+			? `showing ${pageSize} of ${totalUnits} ${unit}s - the checkpoint has moved, so the rest is NOT reachable with --offset; re-read it with --since ${fmtDate(window.from)} (or use --all next time)`
+			: `showing ${unit}s ${opts.offset + 1}-${opts.offset + pageSize} of ${totalUnits} - next page: --offset ${opts.offset + opts.limit}`);
 	}
 	if (opts.offset && !pageSize) {
 		errors.push(`--offset ${opts.offset} is past the end (${totalUnits} ${unit}(s) matched)`);
@@ -1875,7 +1934,7 @@ async function main() {
 		await fillSnippets(selected, groups ? groups.flatMap((t) => t.messages.slice(0, THREAD_SNIPPETS)) : shown, opts);
 	}
 
-	printDigest(shown, errors, window ?? resolveWindow(opts, null), opts, groups, { matched, totalUnits });
+	printDigest(shown, errors, window, opts, groups, { matched, totalUnits });
 
 	if (opts.sinceLast) await writeFile(STATE_PATH, JSON.stringify(state, null, 2));
 
@@ -1898,5 +1957,5 @@ export {
 	parseHeaders, headerLines, decodeWords, classify, buildQuery, groupThreads,
 	groupSenders, senderAddress, senderName, senderDomain,
 	collectIds, firstId, extractLinks, extractHrefs, selectLinks, decodeEntities,
-	parseUnsubscribe, printDigest,
+	parseUnsubscribe, printDigest, mergeWindows,
 };

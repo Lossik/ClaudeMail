@@ -9,7 +9,7 @@ import {
 	parseHeaders, headerLines, decodeWords, classify, buildQuery, groupThreads,
 	groupSenders, senderAddress, senderName, senderDomain,
 	collectIds, firstId, extractLinks, extractHrefs, selectLinks, decodeEntities,
-	parseUnsubscribe, printDigest,
+	parseUnsubscribe, printDigest, mergeWindows,
 } from './ClaudeMail.js';
 
 // --- search -----------------------------------------------------------------
@@ -435,6 +435,55 @@ test('paging arguments are validated', () => {
 	assert.equal(parseArgs(['--offset', '50']).offset, 50);
 	assert.equal(parseArgs(['--from', 'novak']).sender, 'novak');
 	assert.equal(parseArgs(['--threads']).groupBy, 'thread');
+});
+
+test('--all removes both caps, and refuses to override one that was asked for', () => {
+	const all = parseArgs(['--all']);
+	assert.equal(all.limit, Infinity);
+	assert.equal(all.maxScan, Infinity);
+
+	// Silently winning over an explicit cap would make the output a guess.
+	assert.throws(() => parseArgs(['--all', '--limit', '10']), /cannot be combined with --limit/);
+	assert.throws(() => parseArgs(['--all', '--max-scan', '10']), /cannot be combined with --limit or --max-scan/);
+	// Order must not matter.
+	assert.throws(() => parseArgs(['--limit', '10', '--all']), /cannot be combined with --limit/);
+
+	// Skipping the newest N and taking every remaining one is still meaningful.
+	assert.equal(parseArgs(['--all', '--offset', '5']).offset, 5);
+});
+
+test('--since-last refuses to page, because the run consumes the window', () => {
+	assert.throws(() => parseArgs(['--since-last', '--offset', '50']), /cannot be combined with --offset/);
+	// Offset zero is the default, not a request to page.
+	assert.equal(parseArgs(['--since-last']).offset, 0);
+	assert.equal(parseArgs(['--since-last', '--all']).limit, Infinity);
+});
+
+test('mergeWindows names each account only when the ranges differ', () => {
+	const a = { from: new Date(2026, 6, 29, 3, 10), until: null, label: 'since last check (2026-07-29 03:10)' };
+	const b = { from: new Date(2026, 6, 30, 2, 30), until: null, label: 'since last check (2026-07-30 02:30)' };
+
+	// One account, or several agreeing: the plain label is accurate.
+	assert.equal(mergeWindows([{ name: 'gmail', window: a }]).label, a.label);
+	assert.equal(mergeWindows([{ name: 'gmail', window: a }, { name: 'work', window: a }]).label, a.label);
+
+	// Differing checkpoints: name them, and widen the bounds to cover both so
+	// `from` never excludes a message that is in the listing.
+	const merged = mergeWindows([{ name: 'gmail', window: a }, { name: 'work', window: b }]);
+	assert.equal(merged.label, 'gmail: since last check (2026-07-29 03:10) | work: since last check (2026-07-30 02:30)');
+	assert.equal(merged.from.getTime(), a.from.getTime()); // the earlier of the two
+	assert.equal(merged.until, null); // either one open-ended keeps it open
+
+	assert.equal(mergeWindows([]), null);
+});
+
+test('mergeWindows keeps a closed range closed', () => {
+	const a = { from: new Date(2026, 6, 1), until: new Date(2026, 6, 10), label: '1 .. 10' };
+	const b = { from: new Date(2026, 6, 5), until: new Date(2026, 6, 20), label: '5 .. 20' };
+
+	const merged = mergeWindows([{ name: 'a', window: a }, { name: 'b', window: b }]);
+	assert.equal(merged.from.getTime(), a.from.getTime());
+	assert.equal(merged.until.getTime(), b.until.getTime()); // widest end
 });
 
 test('--group-by accepts only the axes that exist', () => {

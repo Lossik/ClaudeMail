@@ -54,7 +54,7 @@ Konfigurace s hesly je v `~\.claudemail\config.json`.
 | „za poslední den" / „dneska" | `--since 1d` |
 | „za posledních 6 hodin" / „hodinu" | `--since 6h` / `--since 1h` |
 | „za týden" / „za měsíc" | `--since 1w` / `--since 30d` |
-| „od poslední kontroly" | `--since-last` |
+| „od poslední kontroly" | `--since-last --all` (stránkovat nejde, viz níže) |
 | „ze dne 20.7." | `--date 2026-07-20` (na ISO, doplň rok) |
 | „od 15. do 20. července" | `--since 2026-07-15 --until 2026-07-20` |
 | „jen nepřečtené" | `--unread` |
@@ -72,7 +72,8 @@ Konfigurace s hesly je v `~\.claudemail\config.json`.
 | „vrať to z koše", „přesuň to do archivu" | `--move <ref> --move-to <složka>` (viz níže) |
 | „ukaž další" (po stránkování) | `--offset <n>` |
 
-Další volby: `--group-by <thread|sender|domain>`, `--limit <n>` (default 50), `--offset <n>`, `--no-snippet`
+Další volby: `--group-by <thread|sender|domain>`, `--all` (bez stropu — preferuj
+před stránkováním), `--limit <n>` (default 50), `--offset <n>`, `--no-snippet`
 (rychlejší, jen hlavičky), `--snippet-len <n>`, `--max-scan <n>`,
 `--accounts` (výpis účtů), `--json` (strojový výstup — `count` je délka payloadu,
 součet je `matched`; pro shrnutí nepotřebný,
@@ -131,10 +132,20 @@ ClaudeMail.cmd --since 30d --only-bulk --group-by domain --exclude-from gitlab
 Pozor: **exkluze mizí i ze součtů.** Když z takového výpisu skládáš seznam
 k smazání, řekni uživateli, co jsi vyloučil — jinak schová i něco, co čekal.
 
-**Stránkování:** default `--limit` je 50. Řádek
-`! showing messages 1-50 of 213 - next page: --offset 50` znamená, že jsou
-další; číslo za „of" je skutečný počet shod. S `--group-by` se stránkuje
-**po grupách** a grupa se nikdy nerozdělí, takže počet zpráv u ní je vždy úplný.
+**Nestránkuj — ber to `--all`.** Default `--limit` je 50 a řádek
+`! showing messages 1-50 of 213 - next page: --offset 50` svádí k tomu jít po
+stránkách. Nedělej to: každá stránka spouští celé hledání znovu a cena běhu je
+~1 s režie (start procesu + přihlášení) proti ~1 ms na zprávu. Měsíc pošty
+vcelku je 2,2 s, tentýž měsíc po padesátkách je 22 volání a ~24 s. `--all` zruší
+strop u `--limit` i `--max-scan`, takže nemusíš hádat velké číslo ani riskovat,
+že jsi něco utnul.
+
+Stránky navíc **nejsou snapshot** — nová zpráva mezi dvěma stránkami všechno
+posune, takže se poslední zpráva z jedné stránky objeví znovu na další. Na
+stabilní průchod ber `--all` nebo uzavřené okno (`--since X --until Y`).
+
+S `--group-by` se stránkuje **po grupách** a grupa se nikdy nerozdělí, takže
+počet zpráv u ní je vždy úplný.
 
 **V `--json` nikdy nehlas `count` jako počet shod.** Je to délka vráceného pole,
 kterou řeže `--limit` (default 50) — pro součet ber `matched`, u grup
@@ -354,3 +365,11 @@ ClaudeMail.cmd --move gmail:INBOX:8412 --move-to @archive --yes  # uklidit
 - `--since-last` posouvá checkpoint **jen při úspěšném běhu**. Nepoužívej ho,
   když si uživatel zpětně prohlíží starší poštu (na to je `--since`/`--date`),
   jinak mu značku posuneš a příště o ty zprávy přijde.
+- **`--since-last` se nedá stránkovat** a nástroj tu kombinaci odmítne. První
+  běh značku posune, takže druhá stránka by hledala v okně, které už neexistuje.
+  Dávej k němu **`--all`**, ať máš všechno na jeden zátah. Když se vypíše
+  `the checkpoint has moved`, zbytek dotáhneš jen tím `--since <datum>`, které
+  ten řádek nabízí.
+- Checkpoint je **per účet**, takže se účty mohou rozejít. Hlavička pak vypíše
+  okno u každého zvlášť (`gmail: since last check (…) | work: since last
+  check (…)`) — nehlas to jako jedno okno pro oba.
