@@ -64,9 +64,13 @@ Selection (default: --since 1d):
   --folder <name>    Override configured folders (repeatable)
 
 Search (runs on the IMAP server, not after downloading):
-  --from <text>      Match the From header (--sender is an alias)
-  --subject <text>   Match the subject
-  --text <text>      Match the message body
+  --from <text>      Match the From header (--sender is an alias). Repeatable:
+                     several needles match any of them, so one run can cover a
+                     whole list of senders
+  --subject <text>   Match the subject (repeatable, any of them)
+  --text <text>      Match the message body (repeatable, any of them)
+                     Repeats widen one flag; different flags still narrow each
+                     other: --from a --from b --subject c is (a or b) and c
   --exclude-from <t> Drop messages whose From matches <t> (repeatable). Runs as
                      an IMAP NOT, so excluded mail is never downloaded or
                      counted. The needle is literal - no comma splitting
@@ -120,7 +124,11 @@ Headers of one message:
 
 Unsubscribing (the only mode that talks to a server other than IMAP):
   --unsubscribe <ref>  Show the List-Unsubscribe options of a message. Sends
-                     nothing on its own
+                     nothing on its own; repeatable, or comma-separated. Where
+                     the sender publishes no header, the body is searched for a
+                     footer opt-out and the candidates are printed to open by
+                     hand - never submitted, since only the RFC 8058 header
+                     promises that a request unsubscribes anything
   --yes              With --unsubscribe: actually send the one-click
                      unsubscribe request (RFC 8058 senders only)
 
@@ -157,6 +165,9 @@ function parseArgs(argv) {
 		deletes: [],
 		moves: [],
 		unsubscribes: [],
+		senders: [],
+		subjects: [],
+		texts: [],
 		excludeFrom: [],
 		excludeSubject: [],
 		limit: 50,
@@ -196,9 +207,11 @@ function parseArgs(argv) {
 			case '--no-bulk': opts.noBulk = true; break;
 			case '--only-bulk': opts.onlyBulk = true; break;
 			case '--spam': opts.folders.push('@junk'); break;
-			case '--sender': case '--from': opts.sender = value(); break;
-			case '--subject': opts.subject = value(); break;
-			case '--text': opts.text = value(); break;
+			// Repeatable like the exclusions they mirror: a brand mails from several
+			// domains, and a subject worth searching often has a second spelling.
+			case '--sender': case '--from': opts.senders.push(value()); break;
+			case '--subject': opts.subjects.push(value()); break;
+			case '--text': opts.texts.push(value()); break;
 			// Search needles stay literal: splitting them on commas would quietly
 			// change what a filter matches, and a ref= token is the only kind of
 			// value here that is safe to split.
@@ -295,6 +308,13 @@ function parseArgs(argv) {
 	}
 	if (opts.part !== undefined && !opts.save) throw new Error('--part only applies to --save');
 	if (opts.noBulk && opts.onlyBulk) throw new Error('--no-bulk and --only-bulk contradict each other');
+	// Cheap to count here, and the message can still point at the flags.
+	const combinations = [opts.senders, opts.subjects, opts.texts]
+		.filter((needles) => needles.length > 1)
+		.reduce((product, needles) => product * needles.length, 1);
+	if (combinations > MAX_SEARCH_COMBINATIONS) {
+		throw new Error(`repeated --from/--subject/--text multiply out to ${combinations} server-side combinations (limit ${MAX_SEARCH_COMBINATIONS}): repeats widen one flag, so widening two flags at once searches every pairing. Widen one flag per run, or split the needles across runs`);
+	}
 	if (!Number.isFinite(opts.maxSize) || opts.maxSize <= 0) throw new Error('--max-size must be a positive number of MB');
 
 	return opts;
@@ -502,6 +522,44 @@ async function fetchAccount(account, window, opts) {
 }
 
 /**
+ * Turns the repeatable --from/--subject/--text needles into search criteria.
+ *
+ * Repeats widen their own flag (any of them matches) while separate flags keep
+ * narrowing each other, which is the reading people expect from a search box.
+ * IMAP takes only one OR per nesting level, so two widened flags cannot each
+ * become their own OR: the honest way to say (a or b) and (x or y) is one OR
+ * over the combinations. Each combination names distinct keys - from, subject,
+ * body - so merging one needle per flag never drops another.
+ */
+function searchCriteria(opts) {
+	const groups = [
+		(opts.senders || []).map((from) => ({ from })),
+		(opts.subjects || []).map((subject) => ({ subject })),
+		(opts.texts || []).map((body) => ({ body })),
+	].filter((group) => group.length);
+
+	const criteria = {};
+	for (const group of groups.filter((g) => g.length === 1)) Object.assign(criteria, group[0]);
+
+	const widened = groups.filter((group) => group.length > 1);
+	if (widened.length) {
+		criteria.or = widened.reduce(
+			(combinations, group) => combinations.flatMap((sofar) => group.map((needle) => ({ ...sofar, ...needle }))),
+			[{}],
+		);
+	}
+
+	return criteria;
+}
+
+// Every combination becomes its own parenthesised OR operand, so the product of
+// the widened flags is what ends up on the wire. Servers cap a command line
+// (commonly 8 kB), and a query too long to send fails as a protocol error that
+// says nothing about which flag caused it - so refuse while the flags are still
+// in hand and can be named.
+const MAX_SEARCH_COMBINATIONS = 128;
+
+/**
  * Builds the IMAP SEARCH criteria. Sender/subject/text matching runs on the
  * server, which can scan a mailbox far faster than we can download it - the
  * alternative is fetching every header just to throw most of them away.
@@ -512,9 +570,7 @@ function buildQuery(window, opts) {
 	const query = { since: startOfDay(window.from) };
 	if (window.until) query.before = window.until;
 	if (opts.unread) query.seen = false;
-	if (opts.sender) query.from = opts.sender;
-	if (opts.subject) query.subject = opts.subject;
-	if (opts.text) query.body = opts.text;
+	Object.assign(query, searchCriteria(opts));
 
 	// Exclusions belong on the server for the same reason the rest of the search
 	// does, plus one of its own: mail that never arrives is also never counted,
@@ -1411,7 +1467,12 @@ async function relocateMessages(accounts, opts) {
 							continue;
 						}
 
-						const label = `${fmtDateTime(msg.internalDate)} | ${formatAddress(msg.envelope?.from?.[0])} | ${msg.envelope?.subject || '(no subject)'}`;
+						// The ref leads the line so the output can be reconciled with the
+						// list that was asked for: a run interrupted halfway leaves date,
+						// sender and subject, which no caller can match back to its input.
+						// It names where the message came FROM - a move issues a new UID,
+						// so this ref stops resolving the moment the move succeeds.
+						const label = `${accountName}:${folder}:${uid} | ${fmtDateTime(msg.internalDate)} | ${formatAddress(msg.envelope?.from?.[0])} | ${msg.envelope?.subject || '(no subject)'}`;
 						const ok = opts.purge
 							? await client.messageDelete(uid, { uid: true })
 							: await client.messageMove(uid, target, { uid: true });
@@ -1419,7 +1480,7 @@ async function relocateMessages(accounts, opts) {
 						if (ok) {
 							console.log(`${opts.purge ? 'PURGED' : `moved to ${target}`}: ${label}`);
 						} else {
-							console.log(`! failed to ${moving ? 'move' : 'delete'} ${accountName}:${folder}:${uid} - ${label}`);
+							console.log(`! failed to ${moving ? 'move' : 'delete'}: ${label}`);
 							failures++;
 						}
 					}
@@ -1612,6 +1673,44 @@ function parseUnsubscribe(headers) {
 	};
 }
 
+// What an opt-out looks like in a URL, and in the words a sender puts next to
+// one. Czech lists say "odhlásit"; the tool is used against those daily.
+const OPTOUT_URL = /unsub|opt[-_]?out|odhlas|odber|abmelden|desinscri|desuscri|email[-_]?prefer|subscription[-_]?(center|manager|settings)/i;
+const OPTOUT_WORD = /unsubscribe|opt[- ]?out|odhlásit|odhlasit|odhlášen|odhlasen|zrušit odběr|zrusit odber|abmelden|désabonner/i;
+
+/**
+ * Digs an opt-out out of the message body, for the senders that publish no
+ * List-Unsubscribe at all. A footer link hides in three ways, so all three get
+ * a pass: the URL says "unsubscribe" itself, the anchor text says it while the
+ * URL is opaque, or the plain-text alternative puts the words on the same line
+ * as the URL ("Odhlásit tuto rozesílku https://...").
+ *
+ * These are guesses read out of sender-controlled content, never a promise that
+ * a request would unsubscribe anything - which is why they are only ever
+ * printed for a human to open, never submitted by --yes.
+ */
+function optOutLinks(html = '', text = '') {
+	const found = [...extractHrefs(html), ...urlsIn(text)].filter((url) => OPTOUT_URL.test(url));
+	found.push(...anchorOptOuts(html));
+	for (const line of text.split(/\r?\n/)) {
+		if (OPTOUT_WORD.test(line)) found.push(...urlsIn(line));
+	}
+
+	const clean = found.map((url) => url.replace(/[.,;:]+$/, ''));
+	return [...new Set(clean)].slice(0, 5);
+}
+
+/** Links whose visible label offers the opt-out, however opaque the href is. */
+function anchorOptOuts(html) {
+	const found = [];
+	for (const match of html.matchAll(/<a\b[^>]*?href\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'>]+))[^>]*>([\s\S]{0,400}?)<\/a>/gi)) {
+		const url = decodeEntities(match[1] ?? match[2] ?? match[3] ?? '').trim();
+		const label = decodeEntities(match[4].replace(/<[^>]*>/g, ' '));
+		if (/^https?:\/\//i.test(url) && OPTOUT_WORD.test(label)) found.push(url);
+	}
+	return found;
+}
+
 /**
  * Shows how to get off a mailing list, and with --yes performs the one-click
  * request. This is the only place the tool contacts anything but the IMAP
@@ -1651,13 +1750,19 @@ async function readUnsubscribeTargets(accounts, refs) {
 						}
 
 						const headers = parseHeaders(msg.headers);
+						const unsubscribe = parseUnsubscribe(headers);
 						found.set(ref, {
 							subject: msg.envelope?.subject || '(no subject)',
 							from: formatAddress(msg.envelope?.from?.[0]),
 							// Gmail states its spam verdict only by filing the message in
 							// Junk, and that is exactly the case this guards against.
 							tags: classify(headers, /spam|junk|nevyžádan/i.test(folder)),
-							...parseUnsubscribe(headers),
+							...unsubscribe,
+							// Downloading a body costs far more than reading a header, so it
+							// happens only where the header left nothing to work with.
+							footer: unsubscribe.http.length || unsubscribe.mailto.length
+								? []
+								: await readOptOutLinks(client, uid),
 						});
 					}
 				} finally {
@@ -1672,6 +1777,22 @@ async function readUnsubscribeTargets(accounts, refs) {
 	}
 
 	return found;
+}
+
+/**
+ * Fetches one body just to look for a footer opt-out. A failure here is not the
+ * caller's problem: the header verdict is already printed, and an unreadable
+ * body only means there was nothing more to add.
+ */
+async function readOptOutLinks(client, uid) {
+	try {
+		const { content } = await client.download(String(uid), undefined, { uid: true });
+		if (!content) return [];
+		const parsed = await simpleParser(content);
+		return optOutLinks(parsed.html || '', parsed.text || '');
+	} catch {
+		return [];
+	}
 }
 
 /**
@@ -1712,7 +1833,17 @@ async function unsubscribeOne(ref, message, opts) {
 
 	if (!message.http.length && !message.mailto.length) {
 		console.log('\nNo List-Unsubscribe header - this sender offers no machine-readable opt-out.');
-		console.log(`Look for a footer link instead: --body ${ref} --links all`);
+		if (message.footer?.length) {
+			console.log('Found in the body instead - open one in a browser:');
+			for (const url of message.footer) console.log(`  ${url}`);
+			// Only the RFC 8058 header promises that a bare POST unsubscribes. A link
+			// out of a body carries no such promise: requesting it might unsubscribe,
+			// might do nothing, or might just confirm the address is read.
+			console.log('\n--yes cannot act on these: nothing here promises a request would unsubscribe,');
+			console.log('and a footer link often needs a session or a confirmation click.');
+		} else {
+			console.log(`Nothing opt-out shaped in the body either - read it yourself: --body ${ref} --links all`);
+		}
 		process.exitCode = 1;
 		return 'noHeader';
 	}
@@ -1957,5 +2088,6 @@ export {
 	parseHeaders, headerLines, decodeWords, classify, buildQuery, groupThreads,
 	groupSenders, senderAddress, senderName, senderDomain,
 	collectIds, firstId, extractLinks, extractHrefs, selectLinks, decodeEntities,
-	parseUnsubscribe, printDigest, mergeWindows,
+	parseUnsubscribe, printDigest, mergeWindows, searchCriteria, optOutLinks,
+	anchorOptOuts,
 };

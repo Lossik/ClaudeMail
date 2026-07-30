@@ -177,6 +177,18 @@ node ClaudeMail.js --delete work:INBOX:8412 --yes --purge  # PERMANENT
 Without `--purge` this is a move to Trash; the folder is found through IMAP
 SPECIAL-USE, or can be named explicitly with `--trash-folder`.
 
+Every message is identified before it is touched, and the line leads with the
+`ref` it came from:
+
+```
+moved to [Gmail]/Trash: work:INBOX:8412 | 2026-07-15 16:05 | Shop <news@shop.example> | Weekly offers
+```
+
+The `ref` is there so the output can be reconciled with the list that was asked
+for — date, sender and subject alone cannot be matched back to an input, which is
+exactly what a run interrupted halfway leaves behind. It names the source: a move
+issues a new UID, so that `ref` stops resolving the moment the move succeeds.
+
 ### Moving
 
 Deleting is a move to Trash, and `--move` is the same operation with the
@@ -234,6 +246,22 @@ is uncapped and carries every `ref`.
 `SEARCH FROM/SUBJECT/BODY` and run on the server. The difference is an order of
 magnitude: searching two months of mail (2314 messages) takes seconds instead of
 downloading every header first.
+
+All three are repeatable, and a repeat widens its own flag into an `OR` — one run
+can cover a whole list of senders instead of one call per sender:
+
+```bash
+# everything from any of these three, as one census
+node ClaudeMail.js --since 30d --from temu --from booking --from quora --group-by domain
+```
+
+Separate flags keep narrowing each other, so `--from a --from b --subject c` is
+`(a OR b) AND c`. IMAP allows one `OR` per nesting level, so two widened flags
+cannot each become their own: they compile to a single `OR` over the
+combinations, every operand carrying one needle from each flag. That product is
+what goes on the wire, so beyond 128 combinations the run is refused with the
+count — a command line too long to send would otherwise fail as a protocol error
+that names no flag.
 
 `--exclude-from` and `--exclude-subject` (both repeatable) are the same idea
 inverted, compiled to `NOT` and likewise run on the server:
@@ -352,6 +380,15 @@ that:
 - a message tagged `spam` or `auth-fail` is refused outright. Unsubscribing
   confirms that the address is live and read, which is worth more to that kind
   of sender than the mail costs the recipient.
+
+Senders that publish no `List-Unsubscribe` at all used to end the matter. Now the
+body is searched for the footer opt-out instead — by URL shape, by anchor text
+where the URL is an opaque token ("unsubscribe here"), and by the words next to a
+URL in the plain-text alternative. The candidates are printed for a human to open
+and are **never submitted, not even with `--yes`**: only the RFC 8058 header
+promises that a request unsubscribes anything, while a footer link commonly wants
+a session or a confirmation click. Reading the body costs a download, so it
+happens only for the messages whose headers offered nothing.
 
 `--unsubscribe` takes a list (comma-separated, or repeat the flag) and shares
 one connection per account, so a batch of twenty is one login rather than

@@ -120,6 +120,22 @@ ClaudeMail.cmd --since 1w --text "splatnost"  # tělo zprávy
 Když neznáš doménu odesílatele, zkus jméno firmy nebo služby — `--from` hledá
 podřetězec v celé hlavičce From, takže zabere i na jméno, nejen na adresu.
 
+**Všechny tři jsou opakovatelné a opakování znamená „nebo".** Jeden běh tak
+pokryje celý seznam odesílatelů — přesně to, co potřebuješ, když z censu
+vypadne dvacet domén a chceš z nich jen ty své:
+
+```
+ClaudeMail.cmd --since 30d --from temu --from slevomat --from quora --group-by domain
+ClaudeMail.cmd --since 1w --subject faktur --subject invoice
+```
+
+Různé flagy naopak dál **zužují**: `--from a --from b --subject c` je
+„(a nebo b) a zároveň c". Rozšiřovat dva flagy zároveň jde, ale hledá se každá
+kombinace, takže nad 128 kombinacemi to nástroj odmítne a řekne, kolik jich je —
+pak rozšiřuj jen jeden flag na běh. **Nestahuj census celý jen proto, abys
+v něm pak filtroval sám**; to byla obezlička z doby, kdy `--from` bralo jednu
+hodnotu.
+
 **`--exclude-from` a `--exclude-subject` (obojí opakovatelné) vyhazují.** Jdou
 taky na server (jako `NOT`), takže vyloučená pošta se ani nestahuje, ani
 nepočítá — „of 213" tím zůstává pravdivé. Tohle je odpověď na to, že značka
@@ -223,8 +239,13 @@ odesílateli. Proto stejný postup jako u mazání:
   Odhlášení by takovému odesílateli potvrdilo, že adresa je živá a čtená. Když
   o to uživatel stojí, vysvětli mu to a nabídni místo toho smazání.
 - Nikdy neodhlašuj z vlastní iniciativy ani „při úklidu".
-- Když zpráva `List-Unsubscribe` nemá, nástroj to řekne — zkus
-  `--body <ref> --links all` a najdi odkaz v patičce.
+- Když zpráva `List-Unsubscribe` **nemá**, nástroj sám prohledá tělo a vypíše
+  odkazy, které vypadají na odhlášení (pozná i „odhlásit se zde", kde je URL
+  neprůhledné). Tyhle odkazy **nikdy neodesílá ani s `--yes`** — jen hlavička
+  podle RFC 8058 slibuje, že požadavek něco odhlásí, kdežto odkaz z patičky
+  často čeká na přihlášení nebo potvrzovací klik. Předej je uživateli
+  s tím, že je musí otevřít v prohlížeči. Když nenajde nic, řekne to a teprve
+  pak má smysl číst tělo ručně přes `--body <ref> --links all`.
 
 ## Výběr schránky
 
@@ -331,6 +352,12 @@ U mazání postupuj vždy takto:
 - `--purge` maže **nevratně**. Použij jen na výslovné vyžádání a předem
   upozorni, že to nejde vzít zpět.
 - Nikdy nemaž proaktivně ani v rámci úklidu z vlastní iniciativy.
+- Každý řádek výstupu začíná **refem zdrojové zprávy** (`moved to <složka>:
+  <ref> | datum | odesílatel | předmět`), takže se dá spárovat se vstupním
+  seznamem. U velkých dávek na to spoléhej: když běh spadne nebo ho utne
+  timeout, refy z logu ti řeknou, co se stihlo. **Hotovo ale nehlas podle logu**
+  — ověř to novým výpisem, protože přerušený běh nedopíše ani řádek o tom,
+  co nestihl.
 
 ## Přesun mezi složkami (a vytažení z koše)
 

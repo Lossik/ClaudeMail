@@ -9,14 +9,15 @@ import {
 	parseHeaders, headerLines, decodeWords, classify, buildQuery, groupThreads,
 	groupSenders, senderAddress, senderName, senderDomain,
 	collectIds, firstId, extractLinks, extractHrefs, selectLinks, decodeEntities,
-	parseUnsubscribe, printDigest, mergeWindows,
+	parseUnsubscribe, printDigest, mergeWindows, searchCriteria, optOutLinks,
+	anchorOptOuts,
 } from './ClaudeMail.js';
 
 // --- search -----------------------------------------------------------------
 
 test('buildQuery pushes sender/subject/text matching to the server', () => {
 	const window = { from: new Date(2026, 6, 20, 14, 30), until: null };
-	const query = buildQuery(window, { sender: 'novak', subject: 'faktura', text: 'splatnost' });
+	const query = buildQuery(window, { senders: ['novak'], subjects: ['faktura'], texts: ['splatnost'] });
 
 	assert.equal(query.from, 'novak');
 	assert.equal(query.subject, 'faktura');
@@ -53,6 +54,110 @@ test('buildQuery turns exclusions into a server-side NOT', () => {
 	// everything or nothing depending on the server.
 	assert.equal('not' in buildQuery(window, { excludeFrom: [], excludeSubject: [] }), false);
 	assert.equal('not' in buildQuery(window, {}), false);
+});
+
+test('repeated --from widens one flag into a server-side OR', () => {
+	const window = { from: new Date(2026, 6, 20), until: null };
+
+	// A single needle stays a plain criterion - no OR to nest, nothing to pay for.
+	assert.deepEqual(searchCriteria({ senders: ['temu'] }), { from: 'temu' });
+
+	// Several needles on one flag mean "any of them".
+	assert.deepEqual(
+		searchCriteria({ senders: ['temu', 'slevomat', 'quora'] }),
+		{ or: [{ from: 'temu' }, { from: 'slevomat' }, { from: 'quora' }] },
+	);
+
+	// It reaches the actual query, alongside the window and the exclusions.
+	const query = buildQuery(window, { senders: ['temu', 'quora'], excludeFrom: ['gitlab'] });
+	assert.deepEqual(query.or, [{ from: 'temu' }, { from: 'quora' }]);
+	assert.deepEqual(query.not, { from: 'gitlab' });
+	assert.equal(query.from, undefined);
+});
+
+test('a widened flag still narrows against the other flags', () => {
+	// (temu OR quora) AND subject faktura: the single-valued flag stays a plain
+	// key, which IMAP ANDs with the OR next to it.
+	assert.deepEqual(
+		searchCriteria({ senders: ['temu', 'quora'], subjects: ['faktura'] }),
+		{ subject: 'faktura', or: [{ from: 'temu' }, { from: 'quora' }] },
+	);
+
+	// Two widened flags cannot each be their own OR - IMAP allows one per level -
+	// so they become one OR over the combinations. Every operand still carries a
+	// needle from both flags, which is what keeps the AND true.
+	assert.deepEqual(
+		searchCriteria({ senders: ['a', 'b'], subjects: ['x', 'y'] }),
+		{
+			or: [
+				{ from: 'a', subject: 'x' }, { from: 'a', subject: 'y' },
+				{ from: 'b', subject: 'x' }, { from: 'b', subject: 'y' },
+			],
+		},
+	);
+
+	// Nothing asked for leaves no criteria behind at all.
+	assert.deepEqual(searchCriteria({}), {});
+});
+
+test('widening two flags at once is refused before it reaches the server', () => {
+	const many = (flag, n) => Array.from({ length: n }, (_, i) => [flag, `n${i}`]).flat();
+
+	// 20 senders is one OR of 20 - fine, and the case that motivated the flag.
+	assert.equal(parseArgs(many('--from', 20)).senders.length, 20);
+
+	// 20 x 20 is 400 operands on one command line, which servers cut off. The
+	// message has to name the flags: a protocol error would not.
+	assert.throws(
+		() => parseArgs([...many('--from', 20), ...many('--subject', 20)]),
+		/400 server-side combinations.*Widen one flag per run/s,
+	);
+});
+
+test('--from and --subject collect repeats, --sender stays an alias', () => {
+	assert.deepEqual(parseArgs(['--from', 'novak']).senders, ['novak']);
+	assert.deepEqual(parseArgs(['--from', 'a', '--sender', 'b']).senders, ['a', 'b']);
+	assert.deepEqual(parseArgs(['--subject', 'faktura', '--subject', 'invoice']).subjects, ['faktura', 'invoice']);
+	assert.deepEqual(parseArgs(['--text', 'splatnost']).texts, ['splatnost']);
+
+	// Needles stay literal: a comma is a character a subject may contain, and
+	// splitting on it would quietly change what the search matches.
+	assert.deepEqual(parseArgs(['--from', 'a,b']).senders, ['a,b']);
+});
+
+// --- opting out of a list without a header -----------------------------------
+
+test('optOutLinks finds the footer link when the URL says what it does', () => {
+	const html = '<a href="https://x.cz/ucet/odhlaseni-rozesilky/2228">Odhlásit</a>'
+		+ '<a href="https://x.cz/akce/2426796">Otevřený voucher</a>';
+
+	assert.deepEqual(optOutLinks(html, ''), ['https://x.cz/ucet/odhlaseni-rozesilky/2228']);
+});
+
+test('optOutLinks reads the label when the URL gives nothing away', () => {
+	// The opaque-token case: only the words around the link say what it is.
+	const html = '<a href="https://t.example/u/9f3a2b"><span>Unsubscribe here</span></a>';
+	assert.deepEqual(anchorOptOuts(html), ['https://t.example/u/9f3a2b']);
+
+	// The plain-text alternative puts the words on the same line as the URL.
+	const text = 'Nabídky týdne\nOdhlásit tuto rozesílku https://x.cz/e/9f3a2b\nKontakt https://x.cz/kontakt';
+	assert.deepEqual(optOutLinks('', text), ['https://x.cz/e/9f3a2b']);
+});
+
+test('optOutLinks stays quiet when the body offers no opt-out', () => {
+	assert.deepEqual(optOutLinks('<a href="https://x.cz/akce/1">Koupit</a>', 'Kupte https://x.cz/akce/1'), []);
+	assert.deepEqual(optOutLinks('', ''), []);
+	assert.deepEqual(optOutLinks(), []);
+});
+
+test('optOutLinks dedupes across sources and caps what it offers', () => {
+	// The same link arrives from the href scan, the label scan and the text line;
+	// it is one choice for the reader, not three.
+	const html = '<a href="https://x.cz/unsubscribe/1">Unsubscribe</a>';
+	assert.deepEqual(optOutLinks(html, 'Unsubscribe: https://x.cz/unsubscribe/1.'), ['https://x.cz/unsubscribe/1']);
+
+	const many = Array.from({ length: 9 }, (_, i) => `<a href="https://x.cz/unsub/${i}">Odhlásit</a>`).join('');
+	assert.equal(optOutLinks(many, '').length, 5);
 });
 
 // --- threading --------------------------------------------------------------
@@ -433,7 +538,6 @@ test('paging arguments are validated', () => {
 	assert.throws(() => parseArgs(['--offset', 'x']), /zero or a positive/);
 	assert.equal(parseArgs([]).offset, 0);
 	assert.equal(parseArgs(['--offset', '50']).offset, 50);
-	assert.equal(parseArgs(['--from', 'novak']).sender, 'novak');
 	assert.equal(parseArgs(['--threads']).groupBy, 'thread');
 });
 
